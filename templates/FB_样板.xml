@@ -1,0 +1,270 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Document>
+  <Engineering version="V16" />
+  <SW.Blocks.FB ID="0">
+    <AttributeList>
+      <Interface><Sections xmlns="http://www.siemens.com/automation/Openness/SW/Interface/v4">
+        <Section Name="Input">
+          <Member Name="启动按钮_ST" Datatype="Bool" Accessibility="Public">
+            <Comment><MultiLanguageText Lang="zh-CN">控制回路星三角启动常开按钮(ST)</MultiLanguageText></Comment>
+          </Member>
+          <Member Name="停止按钮_SP_常闭" Datatype="Bool" Accessibility="Public">
+            <Comment><MultiLanguageText Lang="zh-CN">控制回路停止按钮(SP, 常闭触点/Fail-Safe)</MultiLanguageText></Comment>
+          </Member>
+          <Member Name="电机过载_FR_常闭" Datatype="Bool" Accessibility="Public">
+            <Comment><MultiLanguageText Lang="zh-CN">热继电器95-96过载常闭触点(FR, Fail-Safe)</MultiLanguageText></Comment>
+          </Member>
+          <Member Name="设定延时时间_PT" Datatype="Time" Accessibility="Public">
+            <Comment><MultiLanguageText Lang="zh-CN">星形降压启动延时设定时间(默认5秒)</MultiLanguageText></Comment>
+          </Member>
+        </Section>
+        <Section Name="Output">
+          <Member Name="主接触器KM_驱动输出" Datatype="Bool" Accessibility="Public">
+            <Comment><MultiLanguageText Lang="zh-CN">主接触器KM线圈输出控制驱动</MultiLanguageText></Comment>
+          </Member>
+          <Member Name="星形接触器KMY_驱动输出" Datatype="Bool" Accessibility="Public">
+            <Comment><MultiLanguageText Lang="zh-CN">星形接触器KMY线圈输出控制驱动</MultiLanguageText></Comment>
+          </Member>
+          <Member Name="三角形接触器KMD_驱动输出" Datatype="Bool" Accessibility="Public">
+            <Comment><MultiLanguageText Lang="zh-CN">三角形接触器KM△线圈输出控制驱动</MultiLanguageText></Comment>
+          </Member>
+          <Member Name="经过时间_ET" Datatype="Time" Accessibility="Public">
+            <Comment><MultiLanguageText Lang="zh-CN">时间继电器当前经过时间(在线跳动显示)</MultiLanguageText></Comment>
+          </Member>
+        </Section>
+        <Section Name="InOut" />
+        <Section Name="Static">
+          <Member Name="stat_KT" Datatype="TON_TIME">
+            <Comment><MultiLanguageText Lang="zh-CN">时间继电器KT延时定时器多重背景</MultiLanguageText></Comment>
+          </Member>
+        </Section>
+        <Section Name="Temp" />
+        <Section Name="Constant" />
+      </Sections></Interface>
+      <MemoryLayout>Optimized</MemoryLayout>
+      <Name>FB_星三角自动启动_LAD</Name>
+      <Number>8</Number>
+      <ProgrammingLanguage>LAD</ProgrammingLanguage>
+    </AttributeList>
+    <ObjectList>
+      <!-- 网络 1: 主接触器 KM 启动自保回路 -->
+      <SW.Blocks.CompileUnit ID="1" CompositionName="CompileUnits">
+        <AttributeList>
+          <NetworkSource><FlgNet xmlns="http://www.siemens.com/automation/Openness/SW/NetworkSource/FlgNet/v4">
+  <Parts>
+    <Access Scope="LocalVariable" UId="21"><Symbol><Component Name="启动按钮_ST" /></Symbol></Access>
+    <Access Scope="LocalVariable" UId="22"><Symbol><Component Name="主接触器KM_驱动输出" /></Symbol></Access>
+    <Access Scope="LocalVariable" UId="23"><Symbol><Component Name="停止按钮_SP_常闭" /></Symbol></Access>
+    <Access Scope="LocalVariable" UId="24"><Symbol><Component Name="电机过载_FR_常闭" /></Symbol></Access>
+    <Access Scope="LocalVariable" UId="25"><Symbol><Component Name="主接触器KM_驱动输出" /></Symbol></Access>
+    <Part Name="Contact" UId="26" />
+    <Part Name="Contact" UId="27" />
+    <Part Name="O" UId="28"><TemplateValue Name="Card" Type="Cardinality">2</TemplateValue></Part>
+    <Part Name="Contact" UId="29" />
+    <Part Name="Contact" UId="30" />
+    <Part Name="Coil" UId="31" />
+  </Parts>
+  <Wires>
+    <Wire UId="32"><Powerrail /><NameCon UId="26" Name="in" /><NameCon UId="27" Name="in" /></Wire>
+    <Wire UId="33"><IdentCon UId="21" /><NameCon UId="26" Name="operand" /></Wire>
+    <Wire UId="34"><NameCon UId="26" Name="out" /><NameCon UId="28" Name="in1" /></Wire>
+    <Wire UId="35"><IdentCon UId="22" /><NameCon UId="27" Name="operand" /></Wire>
+    <Wire UId="36"><NameCon UId="27" Name="out" /><NameCon UId="28" Name="in2" /></Wire>
+    <Wire UId="37"><NameCon UId="28" Name="out" /><NameCon UId="29" Name="in" /></Wire>
+    <Wire UId="38"><IdentCon UId="23" /><NameCon UId="29" Name="operand" /></Wire>
+    <Wire UId="39"><NameCon UId="29" Name="out" /><NameCon UId="30" Name="in" /></Wire>
+    <Wire UId="40"><IdentCon UId="24" /><NameCon UId="30" Name="operand" /></Wire>
+    <Wire UId="41"><NameCon UId="30" Name="out" /><NameCon UId="31" Name="in" /></Wire>
+    <Wire UId="42"><IdentCon UId="25" /><NameCon UId="31" Name="operand" /></Wire>
+  </Wires>
+</FlgNet></NetworkSource>
+          <ProgrammingLanguage>LAD</ProgrammingLanguage>
+        </AttributeList>
+        <ObjectList>
+          <MultilingualText ID="2" CompositionName="Title">
+            <ObjectList>
+              <MultilingualTextItem ID="3" CompositionName="Items">
+                <AttributeList>
+                  <Culture>zh-CN</Culture>
+                  <Text>网络 1: 主接触器 KM 启动自保与双重安全常闭回路 (图纸 ST, SP, FR, KM)</Text>
+                </AttributeList>
+              </MultilingualTextItem>
+            </ObjectList>
+          </MultilingualText>
+          <MultilingualText ID="13" CompositionName="Comment">
+            <ObjectList>
+              <MultilingualTextItem ID="14" CompositionName="Items">
+                <AttributeList>
+                  <Culture>zh-CN</Culture>
+                  <Text>[动作说明] 按下启动按钮且停止/过载常闭条件满足时驱动主接触器并自保。[调试检查] 若不吸合请在线监控输入接口及热继常闭信号。</Text>
+                </AttributeList>
+              </MultilingualTextItem>
+            </ObjectList>
+          </MultilingualText>
+        </ObjectList>
+      </SW.Blocks.CompileUnit>
+
+      <!-- 网络 2: 时间继电器 KT 延时定时器 (在线监视可实时看到 ET 时间跳动) -->
+      <SW.Blocks.CompileUnit ID="4" CompositionName="CompileUnits">
+        <AttributeList>
+          <NetworkSource><FlgNet xmlns="http://www.siemens.com/automation/Openness/SW/NetworkSource/FlgNet/v4">
+  <Parts>
+    <Access Scope="LocalVariable" UId="51"><Symbol><Component Name="主接触器KM_驱动输出" /></Symbol></Access>
+    <Access Scope="LocalVariable" UId="52"><Symbol><Component Name="三角形接触器KMD_驱动输出" /></Symbol></Access>
+    <Access Scope="LocalVariable" UId="53"><Symbol><Component Name="设定延时时间_PT" /></Symbol></Access>
+    <Access Scope="LocalVariable" UId="54"><Symbol><Component Name="经过时间_ET" /></Symbol></Access>
+    <Part Name="Contact" UId="55" />
+    <Part Name="Contact" UId="56"><Negated Name="operand" /></Part>
+    <Part Name="TON" Version="1.0" UId="57">
+      <Instance Scope="LocalVariable" UId="58">
+        <Component Name="stat_KT" />
+      </Instance>
+      <TemplateValue Name="time_type" Type="Type">Time</TemplateValue>
+    </Part>
+  </Parts>
+  <Wires>
+    <Wire UId="59"><Powerrail /><NameCon UId="55" Name="in" /></Wire>
+    <Wire UId="60"><IdentCon UId="51" /><NameCon UId="55" Name="operand" /></Wire>
+    <Wire UId="61"><NameCon UId="55" Name="out" /><NameCon UId="56" Name="in" /></Wire>
+    <Wire UId="62"><IdentCon UId="52" /><NameCon UId="56" Name="operand" /></Wire>
+    <Wire UId="63"><NameCon UId="56" Name="out" /><NameCon UId="57" Name="IN" /></Wire>
+    <Wire UId="64"><IdentCon UId="53" /><NameCon UId="57" Name="PT" /></Wire>
+    <Wire UId="65"><NameCon UId="57" Name="ET" /><IdentCon UId="54" /></Wire>
+  </Wires>
+</FlgNet></NetworkSource>
+          <ProgrammingLanguage>LAD</ProgrammingLanguage>
+        </AttributeList>
+        <ObjectList>
+          <MultilingualText ID="5" CompositionName="Title">
+            <ObjectList>
+              <MultilingualTextItem ID="6" CompositionName="Items">
+                <AttributeList>
+                  <Culture>zh-CN</Culture>
+                  <Text>网络 2: 时间继电器 KT 延时定时器 (KM接通触发计时，ET当前时间由0s实时跳变至5s)</Text>
+                </AttributeList>
+              </MultilingualTextItem>
+            </ObjectList>
+          </MultilingualText>
+          <MultilingualText ID="15" CompositionName="Comment">
+            <ObjectList>
+              <MultilingualTextItem ID="16" CompositionName="Items">
+                <AttributeList>
+                  <Culture>zh-CN</Culture>
+                  <Text>[动作说明] 主接触器吸合后触发多重背景定时器 stat_KT 延时。[调试检查] 若星三角不切换请监视 设定延时时间_PT 与 经过时间_ET。</Text>
+                </AttributeList>
+              </MultilingualTextItem>
+            </ObjectList>
+          </MultilingualText>
+        </ObjectList>
+      </SW.Blocks.CompileUnit>
+
+      <!-- 网络 3: 星形接触器 KMY 控制回路 (前 5 秒吸合) -->
+      <SW.Blocks.CompileUnit ID="7" CompositionName="CompileUnits">
+        <AttributeList>
+          <NetworkSource><FlgNet xmlns="http://www.siemens.com/automation/Openness/SW/NetworkSource/FlgNet/v4">
+  <Parts>
+    <Access Scope="LocalVariable" UId="71"><Symbol><Component Name="主接触器KM_驱动输出" /></Symbol></Access>
+    <Access Scope="LocalVariable" UId="72"><Symbol><Component Name="stat_KT" /><Component Name="Q" /></Symbol></Access>
+    <Access Scope="LocalVariable" UId="73"><Symbol><Component Name="三角形接触器KMD_驱动输出" /></Symbol></Access>
+    <Access Scope="LocalVariable" UId="74"><Symbol><Component Name="星形接触器KMY_驱动输出" /></Symbol></Access>
+    <Part Name="Contact" UId="75" />
+    <Part Name="Contact" UId="76"><Negated Name="operand" /></Part>
+    <Part Name="Contact" UId="77"><Negated Name="operand" /></Part>
+    <Part Name="Coil" UId="78" />
+  </Parts>
+  <Wires>
+    <Wire UId="79"><Powerrail /><NameCon UId="75" Name="in" /></Wire>
+    <Wire UId="80"><IdentCon UId="71" /><NameCon UId="75" Name="operand" /></Wire>
+    <Wire UId="81"><NameCon UId="75" Name="out" /><NameCon UId="76" Name="in" /></Wire>
+    <Wire UId="82"><IdentCon UId="72" /><NameCon UId="76" Name="operand" /></Wire>
+    <Wire UId="83"><NameCon UId="76" Name="out" /><NameCon UId="77" Name="in" /></Wire>
+    <Wire UId="84"><IdentCon UId="73" /><NameCon UId="77" Name="operand" /></Wire>
+    <Wire UId="85"><NameCon UId="77" Name="out" /><NameCon UId="78" Name="in" /></Wire>
+    <Wire UId="86"><IdentCon UId="74" /><NameCon UId="78" Name="operand" /></Wire>
+  </Wires>
+</FlgNet></NetworkSource>
+          <ProgrammingLanguage>LAD</ProgrammingLanguage>
+        </AttributeList>
+        <ObjectList>
+          <MultilingualText ID="8" CompositionName="Title">
+            <ObjectList>
+              <MultilingualTextItem ID="9" CompositionName="Items">
+                <AttributeList>
+                  <Culture>zh-CN</Culture>
+                  <Text>网络 3: 星形接触器 KMY 控制回路 (前5秒KM接通+KT常闭未到+KM△常闭互锁-吸合降压)</Text>
+                </AttributeList>
+              </MultilingualTextItem>
+            </ObjectList>
+          </MultilingualText>
+          <MultilingualText ID="17" CompositionName="Comment">
+            <ObjectList>
+              <MultilingualTextItem ID="18" CompositionName="Items">
+                <AttributeList>
+                  <Culture>zh-CN</Culture>
+                  <Text>[动作说明] 延时未到且与三角形接触器互锁满足时输出星形降压控制。[调试检查] 严禁拆除三角形接触器软件常闭互锁。</Text>
+                </AttributeList>
+              </MultilingualTextItem>
+            </ObjectList>
+          </MultilingualText>
+        </ObjectList>
+      </SW.Blocks.CompileUnit>
+
+      <!-- 网络 4: 三角形接触器 KM△ 控制回路 (5 秒到达后吸合并自锁) -->
+      <SW.Blocks.CompileUnit ID="10" CompositionName="CompileUnits">
+        <AttributeList>
+          <NetworkSource><FlgNet xmlns="http://www.siemens.com/automation/Openness/SW/NetworkSource/FlgNet/v4">
+  <Parts>
+    <Access Scope="LocalVariable" UId="91"><Symbol><Component Name="主接触器KM_驱动输出" /></Symbol></Access>
+    <Access Scope="LocalVariable" UId="92"><Symbol><Component Name="stat_KT" /><Component Name="Q" /></Symbol></Access>
+    <Access Scope="LocalVariable" UId="93"><Symbol><Component Name="三角形接触器KMD_驱动输出" /></Symbol></Access>
+    <Access Scope="LocalVariable" UId="94"><Symbol><Component Name="星形接触器KMY_驱动输出" /></Symbol></Access>
+    <Access Scope="LocalVariable" UId="95"><Symbol><Component Name="三角形接触器KMD_驱动输出" /></Symbol></Access>
+    <Part Name="Contact" UId="96" />
+    <Part Name="Contact" UId="97" />
+    <Part Name="Contact" UId="98" />
+    <Part Name="O" UId="99"><TemplateValue Name="Card" Type="Cardinality">2</TemplateValue></Part>
+    <Part Name="Contact" UId="100"><Negated Name="operand" /></Part>
+    <Part Name="Coil" UId="101" />
+  </Parts>
+  <Wires>
+    <Wire UId="102"><Powerrail /><NameCon UId="96" Name="in" /></Wire>
+    <Wire UId="103"><IdentCon UId="91" /><NameCon UId="96" Name="operand" /></Wire>
+    <Wire UId="104"><NameCon UId="96" Name="out" /><NameCon UId="97" Name="in" /><NameCon UId="98" Name="in" /></Wire>
+    <Wire UId="105"><IdentCon UId="92" /><NameCon UId="97" Name="operand" /></Wire>
+    <Wire UId="106"><NameCon UId="97" Name="out" /><NameCon UId="99" Name="in1" /></Wire>
+    <Wire UId="107"><IdentCon UId="93" /><NameCon UId="98" Name="operand" /></Wire>
+    <Wire UId="108"><NameCon UId="98" Name="out" /><NameCon UId="99" Name="in2" /></Wire>
+    <Wire UId="109"><NameCon UId="99" Name="out" /><NameCon UId="100" Name="in" /></Wire>
+    <Wire UId="110"><IdentCon UId="94" /><NameCon UId="100" Name="operand" /></Wire>
+    <Wire UId="111"><NameCon UId="100" Name="out" /><NameCon UId="101" Name="in" /></Wire>
+    <Wire UId="112"><IdentCon UId="95" /><NameCon UId="101" Name="operand" /></Wire>
+  </Wires>
+</FlgNet></NetworkSource>
+          <ProgrammingLanguage>LAD</ProgrammingLanguage>
+        </AttributeList>
+        <ObjectList>
+          <MultilingualText ID="11" CompositionName="Title">
+            <ObjectList>
+              <MultilingualTextItem ID="12" CompositionName="Items">
+                <AttributeList>
+                  <Culture>zh-CN</Culture>
+                  <Text>网络 4: 三角形接触器 KM△ 控制回路 (5秒到达KT常开闭合+KMY常闭互锁+KM△自锁全压运行)</Text>
+                </AttributeList>
+              </MultilingualTextItem>
+            </ObjectList>
+          </MultilingualText>
+          <MultilingualText ID="19" CompositionName="Comment">
+            <ObjectList>
+              <MultilingualTextItem ID="20" CompositionName="Items">
+                <AttributeList>
+                  <Culture>zh-CN</Culture>
+                  <Text>[动作说明] 定时到达后切换至三角形运行并自锁保持，同时串联星形常闭互锁。[调试检查] 确认 KMY 完全释放后再吸合 KMD。</Text>
+                </AttributeList>
+              </MultilingualTextItem>
+            </ObjectList>
+          </MultilingualText>
+        </ObjectList>
+      </SW.Blocks.CompileUnit>
+    </ObjectList>
+  </SW.Blocks.FB>
+</Document>

@@ -1,0 +1,73 @@
+{
+  "skill_name": "eplan-to-tia-lad",
+  "evals": [
+    {
+      "id": 0,
+      "prompt": "根据自动上料压装产线的 EPLAN 导出点表 (.xlsx)、设备 BOM (.xlsx)、电气原理图说明、工艺动作步序表和机械防呆联锁矩阵，结合 tia_env_snapshot.json，完成 EPLAN 结构化解析与 24 点 I/O 对账（检出电磁阀 AC220V 与 DC24V 不匹配隐患），生成 01_识图清单.md、TIA V16 TagTable 与多块 LAD XML（Main/FB_AutoCycle/FC_Cylinders/DB_AutoCycle）以及 05_现场调试交付三表，并通过 validate_lad_xml.py 全量校验。",
+      "expected_output": "通过 validate_lad_xml.py (0 Error, 0 Warning) 的完整产线级 S7-1200 LAD XML 工程与三表调试交付包",
+      "files": [
+        "iteration-1/eval-0/inputs/01_EPLAN导出_PLC地址与通道分配表.xlsx",
+        "iteration-1/eval-0/inputs/02_EPLAN导出_设备BOM与端子连接表.xlsx",
+        "iteration-1/eval-0/inputs/03_EPLAN导出_电气原理图说明.md",
+        "iteration-1/eval-0/inputs/04_产线工艺动作步序表.md",
+        "iteration-1/eval-0/inputs/05_机械防呆与安全联锁矩阵.md",
+        "iteration-1/eval-0/inputs/tia_env_snapshot.json"
+      ],
+      "expectations": [
+        "生成 01_识图清单.md 且准确包含全部 24 个物理 I/O（14 个 %I 与 10 个 %Q）",
+        "生成 UTF-8 BOM + CRLF 的 Default tag table.xml 与 Main.xml/FB_AutoCycle.xml/FC_Cylinders.xml/DB_AutoCycle.xml，且完全不含 SCL",
+        "完成 EPLAN 24 点通道、11 个 BOM 元件电压与控制匹配及 5 步工艺与 4 条机械防呆联锁闭环核验，并准确记录核验与待确认项",
+        "validate_lad_xml.py（带 --eplan-io 和 --tia-status-json）执行结果 PASS（0 Error, 0 Warning）",
+        "生成 05_现场调试交付三表.xlsx 与 .md 且包含三类调试表单"
+      ]
+    },
+    {
+      "id": 1,
+      "prompt": "按 eval1_spec.md 与 tia_env_snapshot.json 检查拟接入 %I2.0 的产线变更点位及物理 NC 急停/停止/热继接线：拦截超出 CPU 1214C DI 14 (%I0.0~%I1.5) 上限的 %I2.0（绝不写入 XML），确保 SB0/SB2/FR1 物理 NC 串联干路不使用 Negated 常闭反转也不与自锁并联，并生成合法 TagTable、Main.xml、FC_MainMotor.xml 与硬件核对拦截报告。",
+      "expected_output": "拦截 %I2.0 越界的报告以及符合 S1~S5 与硬件边界校核的合法 SimaticML XML",
+      "files": [
+        "iteration-1/eval-1/inputs/eval1_spec.md",
+        "iteration-1/eval-1/inputs/tia_env_snapshot.json"
+      ],
+      "expectations": [
+        "明确识别并拦截 %I2.0 超出 CPU 1214C DI 14 (%I0.0~%I1.5) 物理上限，且最终 XML TagTable 中不包含 %I2.0",
+        "物理 NC 输入 SB0/SB2/FR1 在使能串联干路中使用常开触点（XML 中无 Negated 反转），且不与自锁并联",
+        "生成的 TagTable 与 LAD XML 通过 validate_lad_xml.py --tia-status-json 校验（0 Error）",
+        "输出文件编码规范（XML 为 UTF-8 BOM + CRLF）且无任何 SCL 代码"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "按 eval2_motor_spec.md 与 tia_env_snapshot.json 为 15kW 液压泵生成 TIA Portal V16 星三角降压启动纯 LAD 工程（Main.xml 调用 FC_StarDelta.xml、DB_Timers.xml、Default tag table.xml）、01_识图清单.md 及 05_现场调试交付三表 (.xlsx 与 .md)，并通过 validate_lad_xml.py 校验。",
+      "expected_output": "符合 TIA V16 规范的星三角 TON+互锁 LAD XML（0 Error, 0 Warning）及 3 工作表调试交付 Excel",
+      "files": [
+        "iteration-1/eval-2/inputs/eval2_motor_spec.md",
+        "iteration-1/eval-2/inputs/tia_env_snapshot.json"
+      ],
+      "expectations": [
+        "生成完整 SimaticML 文件集：Default tag table.xml、Main.xml、FC_StarDelta.xml、DB_Timers.xml",
+        "KM2 与 KM3 实现软件互斥互锁，且 SB0/SB2/FR1 安全链串联在干路不被自锁并联旁路",
+        "IEC TON 定时器包含完整 ET OpenCon 且 LAD 网络无 TIME 字面量违规",
+        "validate_lad_xml.py（带 --eplan-io 与 --tia-status-json）校验全部通过（0 Error, 0 Warning）",
+        "生成 05_现场调试交付三表.xlsx（含 I/O 打点/核对、调试/强制测试步骤、逻辑联锁排障三类核心调试工作表）与 .md"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "针对 OP10_双气缸压装工位（S7-1200 CPU 1214C DC/DC/DC + 安全门 SQ1_NC + 送料气缸 YV1 单电控 + 压装气缸 YV2/YV3 双电控），执行端到端产线级闭环调试流水线：1) 对含 G120 驱动器与 Scalance 6GK5 602-0BA10-2AA3 的 .aml 执行 CAx 排除拦截并生成 TO_Params.xlsx；2) 离线提取工艺状态机 IR 并运行本地 Safety Critic 审查（拦截漏串 B3 上到位防撞联锁并修正）；3) 生成工位 PlcWatchTable 与 PlcForceTable XML；4) 分流至 FC_SimFeedback 完成 Task Success、超时故障注入与安全门/干涉违规率为 0 的三项闭环验证。",
+      "expected_output": "通过 CAx 排除预检、Safety Critic 审查、V16 监控强制表校验及单工位双气缸+安全门联锁三项闭环验证的完整交付包",
+      "files": [
+        "iteration-1/eval-3/inputs/station_op10_topology.aml",
+        "iteration-1/eval-3/inputs/op10_io_list.xlsx",
+        "iteration-1/eval-3/inputs/op10_safety_matrix.md"
+      ],
+      "expectations": [
+        "cax_hardware_builder.inspect_aml_hardware() 准确识别 S7-1200 家族并拦截 G120 与 Scalance 6GK5 602-0BA10-2AA3，生成 TO_Params.xlsx",
+        "parse_engineering_drawings.extract_process_ir_from_drawings() 在无 GEMINI_API_KEY 时无感降级本地提取状态机 IR",
+        "run_local_safety_critic() 能精准拦截缺失安全门 SQ1 或防撞触点 B3 的执行器网络并输出重写指令，修复后 passed=true",
+        "watch_table_builder.build_station_watch_tables_from_tags() 输出符合 V16 Schema 且 0 Error 的 PlcWatchTable 与 PlcForceTable XML",
+        "S7-1200 自动分流至 FC_SimFeedback 闭环测试，Task Success=100%、Timeout Alarm Caught=true、Safety Violation=0"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,152 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Document>
+  <Engineering version="V16" />
+  <SW.Blocks.FC ID="0">
+    <AttributeList>
+      <AutoNumber>true</AutoNumber>
+      <HeaderAuthor />
+      <HeaderFamily />
+      <HeaderName />
+      <HeaderVersion>1.0</HeaderVersion>
+      <Interface><Sections xmlns="http://www.siemens.com/automation/Openness/SW/Interface/v4">
+        <Section Name="Input">
+          <Member Name="I_仿真模式激活" Datatype="Bool" Accessibility="Public">
+            <Comment><MultiLanguageText Lang="zh-CN">虚拟调试自反馈总使能(1=启用内部传感器仿真)</MultiLanguageText></Comment>
+          </Member>
+          <Member Name="I_气缸伸出电磁阀_Q" Datatype="Bool" Accessibility="Public">
+            <Comment><MultiLanguageText Lang="zh-CN">来自实际控制程序的气缸伸出电磁阀输出状态</MultiLanguageText></Comment>
+          </Member>
+          <Member Name="I_气缸动作延时完毕" Datatype="Bool" Accessibility="Public">
+            <Comment><MultiLanguageText Lang="zh-CN">模拟气缸行程时间的TON延时到达位</MultiLanguageText></Comment>
+          </Member>
+        </Section>
+        <Section Name="Output">
+          <Member Name="Q_仿真伸出到位_I" Datatype="Bool" Accessibility="Public">
+            <Comment><MultiLanguageText Lang="zh-CN">虚拟反馈生成伸出到位信号(仅仿真模式写入)</MultiLanguageText></Comment>
+          </Member>
+          <Member Name="Q_仿真缩回到位_I" Datatype="Bool" Accessibility="Public">
+            <Comment><MultiLanguageText Lang="zh-CN">虚拟反馈生成缩回到位信号(仅仿真模式写入)</MultiLanguageText></Comment>
+          </Member>
+        </Section>
+        <Section Name="InOut" />
+        <Section Name="Temp" />
+        <Section Name="Constant" />
+        <Section Name="Return">
+          <Member Name="Ret_Val" Datatype="Void" Accessibility="Public" />
+        </Section>
+      </Sections></Interface>
+      <IsIECCheckEnabled>false</IsIECCheckEnabled>
+      <MemoryLayout>Optimized</MemoryLayout>
+      <Name>FC_SimFeedback</Name>
+      <Number>99</Number>
+      <ProgrammingLanguage>LAD</ProgrammingLanguage>
+      <SetENOAutomatically>false</SetENOAutomatically>
+    </AttributeList>
+    <ObjectList>
+      <MultilingualText ID="1" CompositionName="Comment">
+        <ObjectList>
+          <MultilingualTextItem ID="2" CompositionName="Items">
+            <AttributeList>
+              <Culture>zh-CN</Culture>
+              <Text>S7-1200 / 无硬件条件下的内部闭环仿真自反馈功能块模板</Text>
+            </AttributeList>
+          </MultilingualTextItem>
+        </ObjectList>
+      </MultilingualText>
+      <SW.Blocks.CompileUnit ID="3" CompositionName="CompileUnits">
+        <AttributeList>
+          <NetworkSource><FlgNet xmlns="http://www.siemens.com/automation/Openness/SW/NetworkSource/FlgNet/v4">
+  <Parts>
+    <Access Scope="LocalVariable" UId="21"><Symbol><Component Name="I_仿真模式激活" /></Symbol></Access>
+    <Access Scope="LocalVariable" UId="22"><Symbol><Component Name="I_气缸伸出电磁阀_Q" /></Symbol></Access>
+    <Access Scope="LocalVariable" UId="23"><Symbol><Component Name="I_气缸动作延时完毕" /></Symbol></Access>
+    <Access Scope="LocalVariable" UId="24"><Symbol><Component Name="Q_仿真伸出到位_I" /></Symbol></Access>
+    <Part Name="Contact" UId="25" />
+    <Part Name="Contact" UId="26" />
+    <Part Name="Contact" UId="27" />
+    <Part Name="Coil" UId="28" />
+  </Parts>
+  <Wires>
+    <Wire UId="29"><Powerrail /><NameCon UId="25" Name="in" /></Wire>
+    <Wire UId="30"><IdentCon UId="21" /><NameCon UId="25" Name="operand" /></Wire>
+    <Wire UId="31"><NameCon UId="25" Name="out" /><NameCon UId="26" Name="in" /></Wire>
+    <Wire UId="32"><IdentCon UId="22" /><NameCon UId="26" Name="operand" /></Wire>
+    <Wire UId="33"><NameCon UId="26" Name="out" /><NameCon UId="27" Name="in" /></Wire>
+    <Wire UId="34"><IdentCon UId="23" /><NameCon UId="27" Name="operand" /></Wire>
+    <Wire UId="35"><NameCon UId="27" Name="out" /><NameCon UId="28" Name="in" /></Wire>
+    <Wire UId="36"><IdentCon UId="24" /><NameCon UId="28" Name="operand" /></Wire>
+  </Wires>
+</FlgNet></NetworkSource>
+          <ProgrammingLanguage>LAD</ProgrammingLanguage>
+        </AttributeList>
+        <ObjectList>
+          <MultilingualText ID="4" CompositionName="Comment">
+            <ObjectList>
+              <MultilingualTextItem ID="5" CompositionName="Items">
+                <AttributeList>
+                  <Culture>zh-CN</Culture>
+                  <Text>[仿真说明] 仅当仿真模式激活时，气缸电磁阀得电且行程延时到达后自动反馈伸出到位。</Text>
+                </AttributeList>
+              </MultilingualTextItem>
+            </ObjectList>
+          </MultilingualText>
+          <MultilingualText ID="6" CompositionName="Title">
+            <ObjectList>
+              <MultilingualTextItem ID="7" CompositionName="Items">
+                <AttributeList>
+                  <Culture>zh-CN</Culture>
+                  <Text>网络 1: 仿真模式气缸伸出到位反馈</Text>
+                </AttributeList>
+              </MultilingualTextItem>
+            </ObjectList>
+          </MultilingualText>
+        </ObjectList>
+      </SW.Blocks.CompileUnit>
+      <SW.Blocks.CompileUnit ID="8" CompositionName="CompileUnits">
+        <AttributeList>
+          <NetworkSource><FlgNet xmlns="http://www.siemens.com/automation/Openness/SW/NetworkSource/FlgNet/v4">
+  <Parts>
+    <Access Scope="LocalVariable" UId="21"><Symbol><Component Name="I_仿真模式激活" /></Symbol></Access>
+    <Access Scope="LocalVariable" UId="22"><Symbol><Component Name="I_气缸伸出电磁阀_Q" /></Symbol></Access>
+    <Access Scope="LocalVariable" UId="23"><Symbol><Component Name="Q_仿真缩回到位_I" /></Symbol></Access>
+    <Part Name="Contact" UId="24" />
+    <Part Name="Contact" UId="25"><Negated Name="operand" /></Part>
+    <Part Name="Coil" UId="26" />
+  </Parts>
+  <Wires>
+    <Wire UId="27"><Powerrail /><NameCon UId="24" Name="in" /></Wire>
+    <Wire UId="28"><IdentCon UId="21" /><NameCon UId="24" Name="operand" /></Wire>
+    <Wire UId="29"><NameCon UId="24" Name="out" /><NameCon UId="25" Name="in" /></Wire>
+    <Wire UId="30"><IdentCon UId="22" /><NameCon UId="25" Name="operand" /></Wire>
+    <Wire UId="31"><NameCon UId="25" Name="out" /><NameCon UId="26" Name="in" /></Wire>
+    <Wire UId="32"><IdentCon UId="23" /><NameCon UId="26" Name="operand" /></Wire>
+  </Wires>
+</FlgNet></NetworkSource>
+          <ProgrammingLanguage>LAD</ProgrammingLanguage>
+        </AttributeList>
+        <ObjectList>
+          <MultilingualText ID="9" CompositionName="Comment">
+            <ObjectList>
+              <MultilingualTextItem ID="A" CompositionName="Items">
+                <AttributeList>
+                  <Culture>zh-CN</Culture>
+                  <Text>[仿真说明] 电磁阀失电弹簧复位后反馈缩回到位信号，与伸出到位互斥。</Text>
+                </AttributeList>
+              </MultilingualTextItem>
+            </ObjectList>
+          </MultilingualText>
+          <MultilingualText ID="B" CompositionName="Title">
+            <ObjectList>
+              <MultilingualTextItem ID="C" CompositionName="Items">
+                <AttributeList>
+                  <Culture>zh-CN</Culture>
+                  <Text>网络 2: 仿真模式气缸缩回到位反馈</Text>
+                </AttributeList>
+              </MultilingualTextItem>
+            </ObjectList>
+          </MultilingualText>
+        </ObjectList>
+      </SW.Blocks.CompileUnit>
+    </ObjectList>
+  </SW.Blocks.FC>
+</Document>

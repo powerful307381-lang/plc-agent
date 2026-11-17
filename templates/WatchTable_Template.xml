@@ -1,0 +1,31 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Document>
+  <Engineering version="V16" />
+  <SW.WatchAndForceTables.PlcWatchTable ID="0">
+    <AttributeList>
+      <Name>WatchTable_工位调试监控样板</Name>
+    </AttributeList>
+    <ObjectList>
+      <SW.WatchAndForceTables.PlcWatchTableEntry ID="1" CompositionName="Entries">
+        <AttributeList>
+          <Address>%I0.0</Address>
+          <DisplayFormat>Bool</DisplayFormat>
+          <ModifyValue>false</ModifyValue>
+          <Name>SB0_急停按钮</Name>
+        </AttributeList>
+        <ObjectList>
+          <MultilingualText ID="2" CompositionName="Comment">
+            <ObjectList>
+              <MultilingualTextItem ID="3" CompositionName="Items">
+                <AttributeList>
+                  <Culture>zh-CN</Culture>
+                  <Text>[2.1 | -SB0 | 11-12/101] 急停按钮常闭输入(NC)</Text>
+                </AttributeList>
+              </MultilingualTextItem>
+            </ObjectList>
+          </MultilingualText>
+        </ObjectList>
+      </SW.WatchAndForceTables.PlcWatchTableEntry>
+    </ObjectList>
+  </SW.WatchAndForceTables.PlcWatchTable>
+</Document>

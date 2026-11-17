@@ -1,0 +1,31 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Document>
+  <Engineering version="V16" />
+  <SW.WatchAndForceTables.PlcForceTable ID="0">
+    <AttributeList>
+      <Name>ForceTable_安全联锁测试样板</Name>
+    </AttributeList>
+    <ObjectList>
+      <SW.WatchAndForceTables.PlcForceTableEntry ID="1" CompositionName="Entries">
+        <AttributeList>
+          <Address>%Q0.0:P</Address>
+          <DisplayFormat>Bool</DisplayFormat>
+          <ForceValue>false</ForceValue>
+          <Name>YV1_1号送料气缸伸出</Name>
+        </AttributeList>
+        <ObjectList>
+          <MultilingualText ID="2" CompositionName="Comment">
+            <ObjectList>
+              <MultilingualTextItem ID="3" CompositionName="Items">
+                <AttributeList>
+                  <Culture>zh-CN</Culture>
+                  <Text>[4.2 | -YV1 | A1/202] 冷态强制测试（须断开主动力电源并经人工确认）</Text>
+                </AttributeList>
+              </MultilingualTextItem>
+            </ObjectList>
+          </MultilingualText>
+        </ObjectList>
+      </SW.WatchAndForceTables.PlcForceTableEntry>
+    </ObjectList>
+  </SW.WatchAndForceTables.PlcForceTable>
+</Document>

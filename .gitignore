@@ -1,0 +1,38 @@
+# Python 字节码与编译缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+
+# 测试与打包输出
+.pytest_cache/
+test_out/
+dist/
+build/
+*.egg-info/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+ENV/
+
+# 临时文件与备份
+*.tmp
+*.bak
+*.log
+
+# 西门子博途归档与工程备份
+*.zap*
+
+# 环境变量与密钥
+.env
+.env.*
+
+# 编辑器与操作系统生成文件
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

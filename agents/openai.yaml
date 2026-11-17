@@ -1,0 +1,8 @@
+interface:
+  display_name: "EPLAN to TIA Portal LAD Closed-Loop Agent"
+  short_description: "EPLAN to Siemens TIA Portal LAD generation and commissioning"
+  brand_color: "#004C87"
+  default_prompt: "Use $eplan-to-tia-lad to parse EPLAN exports, build safe LAD XML, and run closed-loop TIA Portal commissioning."
+
+policy:
+  allow_implicit_invocation: false
