@@ -101,8 +101,8 @@ python -m pytest tests -v
 python scripts/validate_lad_xml.py templates
 ```
 
-* **在 Claude Code / Antigravity CLI (`agy`) 中作为 Skill 使用**：
-  将本项目文件夹放入你的工作区 `.claude/skills/eplan-to-tia-lad` 或全局 Skills 目录，Agent 会自动识别 `SKILL.md` 与 `agents/openai.yaml`（默认启用 `allow_implicit_invocation: false` 保护高危操作）。
+* **在 Claude Code / Antigravity CLI (`agy`) / Codex 中作为 Skill 使用**：
+  将本项目文件夹放入你的工作区 `.claude/skills/eplan-to-tia-lad`、`.agents/skills/eplan-to-tia-lad` 或全局 Skills 目录（`~/.gemini/config/skills/`），Agent 会自动识别 `SKILL.md`。注意：`agents/openai.yaml` 中的 `allow_implicit_invocation: false` 策略主要由 OpenAI Codex 等兼容运行时原生读取；在 Antigravity / Claude Code 中仍需借助 `SKILL.md` 的高危门禁红线与脚本硬拦截确保受控操作。
 * **作为标准 FastMCP Server 启动**：
   ```powershell
   python scripts/tia_connect.py --mcp
@@ -199,9 +199,10 @@ eplan-to-tia-lad/
 │   ├── 08_调试交付三表模板.md         # 现场 I/O 打点表、空载试车步骤、联锁排障速查表规范
 │   ├── 09_CAx_AML_Hardware_Rules.md   # AutomationML 导出要求与 CAx 排除设备清单
 │   ├── 09_产线级EPLAN导出与工艺输入规范.md # 6 类产线输入资料字段规范与 Markdown 填空模板
-│   ├── 10_Line_Coordination_Patterns.md    # PLCWorld 五大产线控制依赖关系族 LAD 映射范式
-│   └── 11_Commissioning_SOP_Gates.md       # S7-1200/1500 仿真分流、F-PLC 边界与 OT 安全门禁
-├── templates/                         # 本机 TIA Portal V16 实测导出的权威 SimaticML 样板库
+│   ├── 10_Line_Coordination_Patterns.md    # 产线五大控制依赖关系族 LAD 映射范式
+│   ├── 11_Commissioning_SOP_Gates.md       # S7-1200/1500 仿真分流、F-PLC 边界与 OT 安全门禁
+│   └── 12_API与CLI速查手册.md              # cli.py 统一命令行、PS1 参数与 Python 构建器签名速查
+├── templates/                         # 本机 TIA Portal V16 实测导出的权威 SimaticML 样板库（V17–V20 向下兼容导入）
 │   ├── 样板结构说明.md                # 20 份样板与 17 段高级指令精确行号索引
 │   ├── FB_StationModeManager.xml      # 工位标准模式管理 FB（安全链、手自动、回原位、复位脉冲）
 │   ├── FB_StandardActuator.xml        # 标准执行器 FB（手自动分流 + 公共防撞 + 超时 + 双传感粘连）
@@ -211,6 +212,9 @@ eplan-to-tia-lad/
 │   ├── ForceTable_Template.xml        # 冷态强制表样板
 │   └── ...                            # OB1 / OB30 / OB100 / FC / FB多重背景 / GlobalDB / IDB 样板
 ├── scripts/                           # 确定性构建、形式化审计与 Openness 桥接脚本
+│   ├── common_utils.py                # 共享 XML 转义、位级地址跨度、BOM/UTF-8 写盘与 CPU 家族识别
+│   ├── cli.py                         # 统一工程命令行入口（reconcile/extract-ir/inspect-aml/critic/simulate/deliver）
+│   ├── tia_common.psm1                # PowerShell Openness 公共函数库与一次性在线比对票据校验模块
 │   ├── eplan_auto_export.ps1          # EPLAN W3u.exe CLI 静默导出脚本 (.elk ➔ .aml/.xlsx/.pdf)
 │   ├── eplan_parser.py                # EPLAN 点表/BOM/工艺规范解析与四方对账报告生成器
 │   ├── cax_hardware_builder.py        # CAx .aml 排除设备预检、导入与 TO_Params.xlsx 构建器
@@ -219,13 +223,13 @@ eplan-to-tia-lad/
 │   ├── lad_builder.py                 # 纯 LAD 程序段、FB 调用、IDB、工位交接握手 XML 构建器
 │   ├── watch_table_builder.py         # 按工位/功能自动切分生成 PlcWatchTable 与 PlcForceTable
 │   ├── sim_feedback_builder.py        # 执行器-传感器自动配对与 FC99_仿真自反馈 XML 生成器
-│   ├── validate_lad_xml.py            # SimaticML 全维度静态语法、内存重叠与能流割点安全校验器
+│   ├── validate_lad_xml.py            # SimaticML 全维度静态语法、内存重叠、能流割点与 FB 实参穿透校验器
 │   ├── block_fingerprint.py           # 去 UId 化语义指纹提取与 Diff 对比引擎
 │   ├── plcsim_closed_loop_runner.py   # PLCSIM Adv / 离散扫描周期仿真器与三项闭环评测引擎
 │   ├── tia_bridge_core.ps1            # TIA Openness 底层 C#/.NET 反射桥接核心 (10 大 Action)
-│   ├── do_import_pipeline.ps1         # 串行互斥锁、.zap16 备份、块级回滚与事务导入编译流水线
+│   ├── do_import_pipeline.ps1         # 串行互斥锁、.zap* 备份、块级/新建对象回滚与事务导入编译流水线
 │   ├── tia_connect.py                 # FastMCP Server (8 大核心工具) 与 OT 安全防注入封装
-│   ├── delivery_builder.py            # 《05_现场调试交付三表.xlsx/.md》正向构建器
+│   ├── delivery_builder.py            # 《05_现场调试交付三表.xlsx/.md》正向构建器（含 Excel 公式看板）
 │   ├── reverse_to_delivery_tables.py  # 从博途 XML 或运行中博途进程反向一键生成交付三表
 │   └── package_skill.py               # 纯净发布包构建脚本（自动清理缓存与剔除 .git）
 ├── tests/                             # Pytest 自动化回归测试套件（结构/安全/指纹/产线/仿真闭环）
@@ -244,9 +248,9 @@ eplan-to-tia-lad/
 3. `tia_configure_technology_objects`：解析《`TO_Params.xlsx`》并将定位轴/驱动参数写入博途 `TechnologicalObjectGroup`。
 4. `tia_compile_and_diagnose`：执行 `-DiffOnly` 语义指纹预检、Gate 3 令牌核验、`.zap16` 归档备份、事务性导入与结构化编译错误树提取。
 5. `tia_manage_watch_force_tables`：批量导入工位 `PlcWatchTable` / `PlcForceTable` 并可选绑定至 CPU Web Server。
-6. `tia_compare_online`：执行离线工程与在线物理 PLC 的 `CompareToOnline` 比对，识别 F-PLC 并签发 `ConfirmOnlineToken`。
-7. `tia_download_to_plc`：受三重安全门禁（`human_approved=True` + `confirm_online_token` + F-PLC 首次手动下载核验）保护的受控程序下载。
-8. `tia_live_data_channel`：支持 TCP 102 (`S7CommPlus` / `Snap7`) 实时映像区探活读取、离散仿真单步快照以及受人工门禁保护的冷态输出强制。
+6. `tia_compare_online`：执行离线工程与在线物理 PLC 的 `CompareToOnline` 比对，识别 F-PLC 并签发一次性 15 分钟有效的 `ConfirmOnlineToken`（PLC 离线或不可达时返回 `Success=False` 且不签发令牌）。
+7. `tia_download_to_plc`：受三重安全门禁（`human_approved=True` + 经 `compare-online` 严格验签且防重放的一次性 `confirm_online_token` + F-PLC 首次手动下载核验）保护的受控程序下载。
+8. `tia_live_data_channel`：支持 TCP 102 (`S7CommPlus` / `Snap7`) 实时映像区读取（需在博途 CPU 属性勾选 **允许来自远程对象的 PUT/GET 通信访问**，连接失败诚实报错）、离散仿真单步快照，以及受人工门禁保护的冷态强制预检（`DryRun` 模式）。
 
 ---
 

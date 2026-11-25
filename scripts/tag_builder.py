@@ -14,6 +14,19 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from typing import List, Dict, Any, Tuple, Optional
 
+try:
+    from common_utils import (
+        escape_xml as _escape_xml,
+        parse_address_bit_span as _parse_addr_bit_span,
+        write_utf8_bom_crlf,
+    )
+except ImportError:
+    from scripts.common_utils import (  # type: ignore
+        escape_xml as _escape_xml,
+        parse_address_bit_span as _parse_addr_bit_span,
+        write_utf8_bom_crlf,
+    )
+
 
 # 正则规则
 RE_IQ_NAME = re.compile(r'^[A-Z]{1,3}\d{1,3}[A-Z]?_[\u4e00-\u9fa5A-Za-z0-9_]+$')
@@ -23,39 +36,6 @@ RE_BIT_ADDR = re.compile(r'^%?[IQM]\d+\.[0-7]$', re.IGNORECASE)
 RE_WORD_ADDR = re.compile(r'^%?[IQM][BWD]\d+$', re.IGNORECASE)
 RE_EPLAN_COMMENT = re.compile(r'^\[\s*[^|\]]+\s*\|\s*[^|\]]+\s*\|\s*[^|\]]+\s*\]')
 SAFETY_KEYWORDS = ("急停", "热继", "停止", "极限", "限位", "安全门", "光栅", "过载")
-
-
-def _parse_addr_bit_span(logical_addr: str, data_type: str = "Bool") -> Optional[Tuple[str, int, int]]:
-    """将西门子逻辑地址解析为 (区域, 起始绝对位偏移, 占用位数)"""
-    addr = (logical_addr or "").strip().upper()
-    bit_m = re.match(r'^%([IQM])(\d+)\.([0-7])$', addr)
-    if bit_m:
-        return bit_m.group(1), int(bit_m.group(2)) * 8 + int(bit_m.group(3)), 1
-    width_m = re.match(r'^%([IQM])([BWD])(\d+)$', addr)
-    if width_m:
-        width_bits = {"B": 8, "W": 16, "D": 32}[width_m.group(2)]
-        return width_m.group(1), int(width_m.group(3)) * 8, width_bits
-    plain_m = re.match(r'^%([IQM])(\d+)$', addr)
-    if plain_m:
-        dt = (data_type or "Byte").strip().lower()
-        if dt in ("word", "int", "uint", "s5time"):
-            w = 16
-        elif dt in ("dword", "dint", "udint", "real", "time", "tod"):
-            w = 32
-        else:
-            w = 8
-        return plain_m.group(1), int(plain_m.group(2)) * 8, w
-    return None
-
-
-def _escape_xml(val: Any) -> str:
-    return (
-        str(val)
-        .replace('&', '&amp;')
-        .replace('<', '&lt;')
-        .replace('>', '&gt;')
-        .replace('"', '&quot;')
-    )
 
 
 def validate_tag_item(tag: Dict[str, Any]) -> List[str]:
@@ -157,10 +137,7 @@ def _write_tag_table_xml(table_name: str, items: List[Dict[str, Any]], out_xml_p
     xml_lines.append('  </SW.Tags.PlcTagTable>')
     xml_lines.append('</Document>')
 
-    os.makedirs(os.path.dirname(os.path.abspath(out_xml_path)), exist_ok=True)
-    with open(out_xml_path, 'wb') as f:
-        f.write(b'\xef\xbb\xbf')
-        f.write('\r\n'.join(xml_lines).encode('utf-8'))
+    write_utf8_bom_crlf(out_xml_path, '\r\n'.join(xml_lines))
 
 
 def build_tags(

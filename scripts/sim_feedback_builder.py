@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 try:
     from lad_builder import (
         LadNetworkBuilder,
+        build_composite_network,
         build_fc_xml,
         render_network_xml,
         write_xml_file,
@@ -19,6 +20,7 @@ try:
 except ImportError:
     from scripts.lad_builder import (  # type: ignore
         LadNetworkBuilder,
+        build_composite_network,
         build_fc_xml,
         render_network_xml,
         write_xml_file,
@@ -206,6 +208,15 @@ def _build_ton_feedback_network(
     return render_network_xml(builder)
 
 
+def _build_sensor_outputs(set_sensor: Optional[str], reset_sensor: Optional[str]) -> List[Dict[str, Any]]:
+    outs: List[Dict[str, Any]] = []
+    if set_sensor:
+        outs.append({"var": set_sensor, "type": "SCoil"})
+    if reset_sensor:
+        outs.append({"var": reset_sensor, "type": "RCoil"})
+    return outs
+
+
 def build_sim_feedback_fc_xml(
     pairs: List[Dict[str, Any]],
     timer_db_name: str = "全局定时器",
@@ -214,9 +225,11 @@ def build_sim_feedback_fc_xml(
     fc_number: int = 99,
     sim_enable_addr: str = "%M19.0",
     out_xml_path: Optional[str] = None,
+    compact: bool = True,
 ) -> Tuple[str, List[str], List[Dict[str, Any]]]:
     """
     生成可在 TIA Portal V16 编译及在 S7-1200/仿真器闭环执行的 FC99_仿真自反馈.xml。
+    默认 compact=True：将同一执行器的“工作位反馈”与“回原位反馈”两条梯级合并为 1 个复合程序段。
     返回: (fc_xml_str, timer_member_names, sim_m_tags)
     """
     networks: List[str] = []
@@ -233,49 +246,76 @@ def build_sim_feedback_fc_xml(
         travel_time = p.get("travel_time", "T#1S")
 
         if ctrl_mode == "single_acting":
-            # 1. 得电伸出 -> 延时置位工作到位, 复位原位
             t_ext = f"T_Sim_{idx}_Work"
-            timer_members.append(t_ext)
-            networks.append(
-                _build_ton_feedback_network(
-                    nw_index=nw_idx,
-                    title=f"NW{nw_idx} {grp}仿真工作位反馈(单电控)",
-                    comment=f"【仿真说明】当 {sim_enable_tag}=1 且 {work_coil} 得电持续 {travel_time}，自动反馈工作位到位并复位原位。",
-                    enable_contacts=[
-                        {"name": sim_enable_tag, "negated": False},
-                        {"name": work_coil, "negated": False},
-                    ],
-                    timer_db_name=timer_db_name,
-                    timer_member=t_ext,
-                    travel_time=travel_time,
-                    set_sensor=work_sensor,
-                    reset_sensor=home_sensor,
-                )
-            )
-            nw_idx += 1
-
-            # 2. 失电弹簧回位 -> 延时置位原位, 复位工作位
             t_ret = f"T_Sim_{idx}_Home"
-            timer_members.append(t_ret)
-            networks.append(
-                _build_ton_feedback_network(
-                    nw_index=nw_idx,
-                    title=f"NW{nw_idx} {grp}仿真弹簧回原位反馈(单电控)",
-                    comment=f"【仿真说明】当 {sim_enable_tag}=1 且 {work_coil} 失电持续 {travel_time}，自动弹簧复位原位传感器。",
-                    enable_contacts=[
-                        {"name": sim_enable_tag, "negated": False},
-                        {"name": work_coil, "negated": True},
-                    ],
-                    timer_db_name=timer_db_name,
-                    timer_member=t_ret,
-                    travel_time=travel_time,
-                    set_sensor=home_sensor,
-                    reset_sensor=work_sensor,
+            timer_members.extend([t_ext, t_ret])
+            if compact:
+                networks.append(
+                    build_composite_network(
+                        nw_index=nw_idx,
+                        title=f"NW{nw_idx} {grp}仿真行程反馈(单电控)",
+                        comment=(
+                            f"【仿真说明】仅 {sim_enable_tag}=1 时生效：\n"
+                            f"支路1：{work_coil} 得电 {travel_time} 后置位工作位并复位原位；\n"
+                            f"支路2：{work_coil} 失电 {travel_time} 后弹簧复位原位传感器。"
+                        ),
+                        rungs=[
+                            {
+                                "contacts": [
+                                    {"name": sim_enable_tag, "negated": False},
+                                    {"name": work_coil, "negated": False},
+                                ],
+                                "ton": {"member": t_ext, "pt": travel_time, "db_name": timer_db_name},
+                                "outputs": _build_sensor_outputs(work_sensor, home_sensor),
+                            },
+                            {
+                                "contacts": [
+                                    {"name": sim_enable_tag, "negated": False},
+                                    {"name": work_coil, "negated": True},
+                                ],
+                                "ton": {"member": t_ret, "pt": travel_time, "db_name": timer_db_name},
+                                "outputs": _build_sensor_outputs(home_sensor, work_sensor),
+                            },
+                        ],
+                    )
                 )
-            )
-            nw_idx += 1
+                nw_idx += 1
+            else:
+                networks.append(
+                    _build_ton_feedback_network(
+                        nw_index=nw_idx,
+                        title=f"NW{nw_idx} {grp}仿真工作位反馈(单电控)",
+                        comment=f"【仿真说明】当 {sim_enable_tag}=1 且 {work_coil} 得电持续 {travel_time}，自动反馈工作位到位并复位原位。",
+                        enable_contacts=[
+                            {"name": sim_enable_tag, "negated": False},
+                            {"name": work_coil, "negated": False},
+                        ],
+                        timer_db_name=timer_db_name,
+                        timer_member=t_ext,
+                        travel_time=travel_time,
+                        set_sensor=work_sensor,
+                        reset_sensor=home_sensor,
+                    )
+                )
+                nw_idx += 1
+                networks.append(
+                    _build_ton_feedback_network(
+                        nw_index=nw_idx,
+                        title=f"NW{nw_idx} {grp}仿真弹簧回原位反馈(单电控)",
+                        comment=f"【仿真说明】当 {sim_enable_tag}=1 且 {work_coil} 失电持续 {travel_time}，自动弹簧复位原位传感器。",
+                        enable_contacts=[
+                            {"name": sim_enable_tag, "negated": False},
+                            {"name": work_coil, "negated": True},
+                        ],
+                        timer_db_name=timer_db_name,
+                        timer_member=t_ret,
+                        travel_time=travel_time,
+                        set_sensor=home_sensor,
+                        reset_sensor=work_sensor,
+                    )
+                )
+                nw_idx += 1
         else:
-            # 双电控正侧动作 -> 延时置位工作位
             t_work = f"T_Sim_{idx}_Work"
             timer_members.append(t_work)
             work_contacts = [
@@ -284,43 +324,75 @@ def build_sim_feedback_fc_xml(
             ]
             if home_coil:
                 work_contacts.append({"name": home_coil, "negated": True})
-            networks.append(
-                _build_ton_feedback_network(
-                    nw_index=nw_idx,
-                    title=f"NW{nw_idx} {grp}仿真工作位反馈(双电控)",
-                    comment=f"【仿真说明】当 {sim_enable_tag}=1 且 {work_coil} 得电持续 {travel_time}，置位工作到位传感器。",
-                    enable_contacts=work_contacts,
-                    timer_db_name=timer_db_name,
-                    timer_member=t_work,
-                    travel_time=travel_time,
-                    set_sensor=work_sensor,
-                    reset_sensor=home_sensor,
-                )
-            )
-            nw_idx += 1
 
-            # 双电控回程动作 -> 延时置位原位
-            if home_coil:
+            if compact and home_coil:
                 t_home = f"T_Sim_{idx}_Home"
                 timer_members.append(t_home)
                 networks.append(
-                    _build_ton_feedback_network(
+                    build_composite_network(
                         nw_index=nw_idx,
-                        title=f"NW{nw_idx} {grp}仿真回原位反馈(双电控)",
-                        comment=f"【仿真说明】当 {sim_enable_tag}=1 且 {home_coil} 得电持续 {travel_time}，置位原位传感器。",
-                        enable_contacts=[
-                            {"name": sim_enable_tag, "negated": False},
-                            {"name": home_coil, "negated": False},
-                            {"name": work_coil, "negated": True},
+                        title=f"NW{nw_idx} {grp}仿真双向行程反馈(双电控)",
+                        comment=(
+                            f"【仿真说明】仅 {sim_enable_tag}=1 时生效：\n"
+                            f"支路1：{work_coil} 得电 {travel_time} 后置位工作位；\n"
+                            f"支路2：{home_coil} 得电 {travel_time} 后置位原位。"
+                        ),
+                        rungs=[
+                            {
+                                "contacts": work_contacts,
+                                "ton": {"member": t_work, "pt": travel_time, "db_name": timer_db_name},
+                                "outputs": _build_sensor_outputs(work_sensor, home_sensor),
+                            },
+                            {
+                                "contacts": [
+                                    {"name": sim_enable_tag, "negated": False},
+                                    {"name": home_coil, "negated": False},
+                                    {"name": work_coil, "negated": True},
+                                ],
+                                "ton": {"member": t_home, "pt": travel_time, "db_name": timer_db_name},
+                                "outputs": _build_sensor_outputs(home_sensor, work_sensor),
+                            },
                         ],
-                        timer_db_name=timer_db_name,
-                        timer_member=t_home,
-                        travel_time=travel_time,
-                        set_sensor=home_sensor,
-                        reset_sensor=work_sensor,
                     )
                 )
                 nw_idx += 1
+            else:
+                networks.append(
+                    _build_ton_feedback_network(
+                        nw_index=nw_idx,
+                        title=f"NW{nw_idx} {grp}仿真工作位反馈(双电控)",
+                        comment=f"【仿真说明】当 {sim_enable_tag}=1 且 {work_coil} 得电持续 {travel_time}，置位工作到位传感器。",
+                        enable_contacts=work_contacts,
+                        timer_db_name=timer_db_name,
+                        timer_member=t_work,
+                        travel_time=travel_time,
+                        set_sensor=work_sensor,
+                        reset_sensor=home_sensor,
+                    )
+                )
+                nw_idx += 1
+
+                if home_coil:
+                    t_home = f"T_Sim_{idx}_Home"
+                    timer_members.append(t_home)
+                    networks.append(
+                        _build_ton_feedback_network(
+                            nw_index=nw_idx,
+                            title=f"NW{nw_idx} {grp}仿真回原位反馈(双电控)",
+                            comment=f"【仿真说明】当 {sim_enable_tag}=1 且 {home_coil} 得电持续 {travel_time}，置位原位传感器。",
+                            enable_contacts=[
+                                {"name": sim_enable_tag, "negated": False},
+                                {"name": home_coil, "negated": False},
+                                {"name": work_coil, "negated": True},
+                            ],
+                            timer_db_name=timer_db_name,
+                            timer_member=t_home,
+                            travel_time=travel_time,
+                            set_sensor=home_sensor,
+                            reset_sensor=work_sensor,
+                        )
+                    )
+                    nw_idx += 1
 
     fc_xml = build_fc_xml(
         fc_name,

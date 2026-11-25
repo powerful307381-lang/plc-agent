@@ -217,7 +217,7 @@ def inspect_aml_hardware(aml_path: str) -> Dict[str, Any]:
         )
     if any(d["category"] == "HMI" for d in unsupported_devices):
         to_hints.append(
-            "检测到非按键面板 HMI 设备，请在博途内独立配置 HMI 连接，联调阶段配合 webapp-testing 进行画面测试。"
+            "检测到非按键面板 HMI 设备，请在博途内独立配置 HMI 连接，联调阶段配合浏览器/Playwright 进行画面测试。"
         )
     if is_failsafe_cpu:
         to_hints.append(

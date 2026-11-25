@@ -212,7 +212,7 @@ class _CompiledNetwork:
                         sym = access_sym[iu]
                         self.operands[pu] = sym
                         pname = pmeta.get("name", "")
-                        if pname in ("Coil", "SCoil", "RCoil", "NCoil"):
+                        if pname in ("Coil", "SCoil", "RCoil", "NCoil", "PCoil"):
                             self.coils.append((pu, pname, sym))
                     elif pin == "bit" and iu in access_sym:
                         self.bits[pu] = access_sym[iu]
@@ -361,6 +361,7 @@ class LadScanCycleSimulator:
     ) -> None:
         memo: Dict[Tuple[str, str], bool] = {}
         ton_updated: Set[str] = set()
+        edge_coil_done: Dict[str, bool] = {}
 
         def eval_node(node: Any) -> bool:
             if node == "RAIL":
@@ -368,6 +369,24 @@ class LadScanCycleSimulator:
             if isinstance(node, tuple):
                 return eval_pin(node[0], node[1])
             return False
+
+        def eval_edge_coil(uid: str, pname: str) -> bool:
+            """NCoil (-(N)- 下降沿) 与 PCoil (-(P)- 上升沿) 每周期仅更新一次 bit 存储位并输出单周期脉冲"""
+            if uid in edge_coil_done:
+                return edge_coil_done[uid]
+            in_pwr = any(eval_node(s) for s in nw.incoming.get((uid, "in"), []))
+            bit_sym = self._resolve_sym(nw.bits.get(uid, ""), call_ctx)
+            prev = bool(self.state.get(bit_sym, False)) if bit_sym else False
+            if bit_sym:
+                self.state[bit_sym] = in_pwr
+            pulse = ((not in_pwr) and prev) if pname == "NCoil" else (in_pwr and not prev)
+            op_raw = nw.operands.get(uid, "")
+            if op_raw:
+                op_sym = self._resolve_sym(op_raw, call_ctx)
+                if not (forced_inputs and op_sym in forced_inputs):
+                    self.state[op_sym] = pulse
+            edge_coil_done[uid] = pulse
+            return pulse
 
         def eval_pin(uid: str, pin: str) -> bool:
             key = (uid, pin)
@@ -397,6 +416,8 @@ class LadScanCycleSimulator:
                 prev = bool(self.state.get(bit_sym, False))
                 self.state[bit_sym] = in_pwr
                 res = (in_pwr and not prev) if pname == "PBox" else ((not in_pwr) and prev)
+            elif pname in ("NCoil", "PCoil") and pin == "out":
+                res = eval_edge_coil(uid, pname)
             elif pname == "TON" and pin == "Q":
                 inst = self._resolve_sym(pinfo.get("instance", ""), call_ctx)
                 in_pwr = any(eval_node(s) for s in nw.incoming.get((uid, "IN"), []))
@@ -438,15 +459,17 @@ class LadScanCycleSimulator:
             sym = self._resolve_sym(raw_sym, call_ctx)
             if forced_inputs and sym in forced_inputs:
                 continue
+            if ctype in ("NCoil", "PCoil"):
+                eval_edge_coil(cu_id, ctype)
+                continue
             coil_in = any(eval_node(s) for s in nw.incoming.get((cu_id, "in"), []))
             if ctype == "Coil":
-                self.state[sym] = coil_in
+                is_neg = bool(nw.parts.get(cu_id, {}).get("negated", False))
+                self.state[sym] = (not coil_in) if is_neg else coil_in
             elif ctype == "SCoil" and coil_in:
                 self.state[sym] = True
             elif ctype == "RCoil" and coil_in:
                 self.state[sym] = False
-            elif ctype == "NCoil":
-                self.state[sym] = not coil_in
 
     def _execute_call(
         self,
@@ -581,26 +604,41 @@ def _infer_sim_defaults(sim: LadScanCycleSimulator, ir_data: Optional[Dict[str, 
 
     # 2. 结合变量表补全安全/模式/按钮/步序位
     for tname, taddr in sim.tag_addrs.items():
+        tname_u = tname.upper()
         if taddr.startswith("%I"):
-            if any(k in tname for k in ("急停", "安全门", "光栅", "热继", "极限", "限位", "锁紧", "ESTOP", "DOOR")):
+            if any(k in tname for k in ("急停", "安全门", "光栅", "热继", "热保护", "过载", "极限", "限位", "锁紧", "ESTOP", "DOOR", "OVERLOAD")):
+                init_ok.setdefault(tname, True)
+            elif "停止" in tname and "NC" in tname_u:
                 init_ok.setdefault(tname, True)
             elif any(k in tname for k in ("缩回", "上到位", "原位", "零位", "HOME")):
                 init_ok.setdefault(tname, True)
-            elif "手自动" in tname or "SA" in tname.upper() or "MODE" in tname.upper():
+            elif "手自动" in tname or "SA" in tname_u or "MODE" in tname_u:
                 mode_sel = tname
                 init_ok[tname] = True
-            elif ("启动" in tname or "START" in tname.upper()) and ("SB" in tname.upper() or "BTN" in tname.upper()):
-                start_btn = tname
-            elif "点动" in tname or "手动" in tname or "JOG" in tname.upper():
+            elif ("启动" in tname or "START" in tname_u) and (
+                "SB" in tname_u or "BTN" in tname_u or bool(re.match(r"^S\d+_", tname_u))
+            ):
+                # 优先保留含 SB/BTN 的启动按钮；否则回退兼容 IEC 单字母 -S2 等命名
+                if start_btn is None or ("SB" in tname_u or "BTN" in tname_u):
+                    start_btn = tname
+            elif "点动" in tname or "手动" in tname or "JOG" in tname_u:
                 if manual_jog_btn is None:
                     manual_jog_btn = tname
         elif taddr.startswith("%Q"):
             if any(k in tname for k in ("指示", "灯", "报警", "HL", "PF", "LAMP", "ALARM")):
                 alarm_lamp = tname
         elif taddr.startswith("%M"):
-            if "步序" in tname or "STEP" in tname.upper():
+            if "步序" in tname or "STEP" in tname_u:
                 step_vars.append(tname)
-            elif "仿真" in tname or "SIM" in tname.upper():
+            elif (
+                any(k in tname for k in ("仿真使能", "仿真模式", "仿真激活"))
+                or any(k in tname_u for k in ("SIM_EN", "SIM_MODE", "SIM_ACTIVE", "SIMENABLE"))
+                or (
+                    ("仿真" in tname or "SIM" in tname_u)
+                    and not any(ex in tname for ex in ("边沿", "脉冲", "记忆", "到位", "反馈", "虚拟"))
+                    and not any(ex in tname_u for ex in ("EDGE", "PULSE", "MEM", "TRIG", "FB", "DONE"))
+                )
+            ):
                 init_ok[tname] = True
 
     step_vars.sort()

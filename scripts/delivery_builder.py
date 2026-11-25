@@ -10,6 +10,7 @@
 符合规范: eplan-to-tia-lad SKILL.md 阶段 5, references/08_调试交付三表模板.md
 """
 
+from datetime import datetime
 import os
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -17,7 +18,7 @@ from openpyxl.utils import get_column_letter
 from typing import List, Dict, Any
 
 
-def _build_io_test_guidance(addr: str, contact_type: str) -> tuple:
+def _build_io_test_guidance(addr: str, contact_type: str, for_markdown: bool = False) -> tuple:
     """根据 PLC 地址类型（%I/%Q/%IW/%QW）与触点极性生成准确的打点测试方法与预期现象"""
     addr_u = (addr or "").strip().upper()
     if addr_u.startswith("%IW") or addr_u.startswith("%ID"):
@@ -37,13 +38,21 @@ def _build_io_test_guidance(addr: str, contact_type: str) -> tuple:
         )
     # 默认 %I 数字量输入
     if contact_type == "NC":
+        if for_markdown:
+            exp = f"常态 {addr} 指示灯**常亮** (1) → 动作时**熄灭** (0)"
+        else:
+            exp = f"常态 {addr} 指示灯常亮 (1) → 动作时熄灭 (0)"
         return (
             "常态不动作 → 手动触发动作（按下急停/停止/拨动热继 TEST/触发限位）",
-            f"常态 {addr} 指示灯**常亮** (1) → 动作时**熄灭** (0)",
+            exp,
         )
+    if for_markdown:
+        exp = f"常态 {addr} 指示灯**灭** (0) → 动作时**点亮** (1)"
+    else:
+        exp = f"常态 {addr} 指示灯灭 (0) → 动作时点亮 (1)"
     return (
         "常态不动作 → 手动触发动作（按下按钮/金属片靠近传感器/到位触发）",
-        f"常态 {addr} 指示灯**灭** (0) → 动作时**点亮** (1)",
+        exp,
     )
 
 
@@ -81,10 +90,14 @@ def create_delivery_tables(project_info: Dict[str, Any],
     ws_intro.views.sheetView[0].showGridLines = True
 
     pending_items = project_info.get("pending_items", "无未闭环待确认项（若有请在现场复核后补充）")
+    default_date = datetime.now().strftime("%Y-%m-%d")
+    io_count = len(io_list)
+    io_end_row = io_count + 1 if io_count > 0 else 2
+
     intro_data = [
-        ["西门子博途 V16 梯形图自动化工程交付说明书", ""],
+        ["西门子博途自动化工程交付说明书", ""],
         ["项目名称", project_info.get("project_name", "自动化控制项目")],
-        ["编制日期", project_info.get("date", "2026-10-28")],
+        ["编制日期", project_info.get("date", default_date)],
         ["控制器硬件", project_info.get("plc_model", "SIMATIC S7-1200 (CPU 1214C DC/DC/DC)")],
         ["图纸版本", project_info.get("schematic_ver", "V1.0")],
         ["程序版本", "V1.0 (纯 LAD 梯形图)"],
@@ -97,7 +110,13 @@ def create_delivery_tables(project_info: Dict[str, Any],
         ["声明条款", "1. 本 PLC 程序中的急停与联锁逻辑为辅助安全保护，绝对不能替代外部物理硬接线急停回路与专用安全继电器！"],
         ["", "2. 本控制系统不属于安全型故障安全 PLC (Fail-Safe F-CPU) 系统，现场通电调试前必须由持有电工特种作业操作证人员完成冷态硬接线复核。"],
         ["", ""],
-        ["【待确认事项清单 (未闭环项)】", pending_items]
+        ["【待确认事项清单 (未闭环项)】", pending_items],
+        ["", ""],
+        ["📊 现场调试进度自动统计看板（Excel 公式动态联动）", ""],
+        ["物理 I/O 打点总点数", f"=COUNTA('I_O打点表'!B2:B{io_end_row})" if io_count > 0 else 0],
+        ["I/O 打点已通过数 (√)", f"=COUNTIF('I_O打点表'!K2:K{io_end_row},\"√\")" if io_count > 0 else 0],
+        ["I/O 打点异常数 (×)", f"=COUNTIF('I_O打点表'!K2:K{io_end_row},\"×\")" if io_count > 0 else 0],
+        ["I/O 打点通过率", f"=IFERROR(COUNTIF('I_O打点表'!K2:K{io_end_row},\"√\")/COUNTA('I_O打点表'!B2:B{io_end_row}),0)" if io_count > 0 else 0],
     ]
 
     for row in intro_data:
@@ -155,7 +174,7 @@ def create_delivery_tables(project_info: Dict[str, Any],
         contact_type = item.get("contact_type", "NO")
         desc = item.get("description", "")
 
-        method, expected = _build_io_test_guidance(addr, contact_type)
+        method, expected = _build_io_test_guidance(addr, contact_type, for_markdown=False)
 
         # 实测结果与调试人严格留空，等待现场实际打点后手工填写
         row_data = [
@@ -178,12 +197,33 @@ def create_delivery_tables(project_info: Dict[str, Any],
             else:
                 cell.alignment = align_left
 
+    if io_count > 0:
+        summary_row = io_count + 2
+        ws_io.append([
+            "汇总",
+            f"=COUNTA(B2:B{io_end_row})",
+            "以上为有效物理 I/O 点位（含公式实时统计）",
+            "", "", "", "", "", "",
+            "通过(√) / 异常(×)",
+            f"=COUNTIF(K2:K{io_end_row},\"√\")",
+            f"=COUNTIF(K2:K{io_end_row},\"×\")",
+            f"=IFERROR(COUNTIF(K2:K{io_end_row},\"√\")/COUNTA(B2:B{io_end_row}),0)",
+        ])
+        ws_io.row_dimensions[summary_row].height = 24
+        for c_idx in range(1, len(io_headers) + 1):
+            sc = ws_io.cell(row=summary_row, column=c_idx)
+            sc.font = font_bold
+            sc.fill = fill_alt
+            sc.border = border_all
+            sc.alignment = align_center if c_idx in (1, 2, 11, 12, 13) else align_left
+        ws_io.cell(row=summary_row, column=13).number_format = "0.0%"
+
     for col in ws_io.columns:
         col_letter = get_column_letter(col[0].column)
         max_l = max([len(str(c.value or '').encode('gbk', errors='ignore')) for c in col])
         ws_io.column_dimensions[col_letter].width = min(max(max_l + 3, 11), 46)
     ws_io.freeze_panes = "A2"
-    ws_io.auto_filter.ref = ws_io.dimensions
+    ws_io.auto_filter.ref = f"A1:M{io_end_row}"
     ws_io.page_setup.orientation = ws_io.ORIENTATION_LANDSCAPE
     ws_io.page_setup.paperSize = ws_io.PAPERSIZE_A4
     ws_io.print_title_rows = "1:1"
@@ -258,6 +298,10 @@ def create_delivery_tables(project_info: Dict[str, Any],
         col_letter = get_column_letter(col[0].column)
         max_l = max([len(str(c.value or '').encode('gbk', errors='ignore')) for c in col])
         ws_step.column_dimensions[col_letter].width = min(max(max_l + 3, 12), 50)
+    step_end_row = len(steps_data) + 1
+    ws_intro.append(["单机空载调试总步数", f"=COUNTA('单机空载调试步骤'!B2:B{step_end_row})"])
+    ws_intro.append(["单机空载调试通过率", f"=IFERROR(COUNTIF('单机空载调试步骤'!F2:F{step_end_row},\"√\")/COUNTA('单机空载调试步骤'!B2:B{step_end_row}),0)"])
+
     ws_step.freeze_panes = "A2"
     ws_step.auto_filter.ref = ws_step.dimensions
     ws_step.page_setup.orientation = ws_step.ORIENTATION_LANDSCAPE
@@ -326,6 +370,17 @@ def create_delivery_tables(project_info: Dict[str, Any],
         col_letter = get_column_letter(col[0].column)
         max_l = max([len(str(c.value or '').encode('gbk', errors='ignore')) for c in col])
         ws_alarm.column_dimensions[col_letter].width = min(max(max_l + 3, 14), 50)
+    alarm_end_row = len(alarms_data) + 1
+    ws_intro.append(["联锁排障速查条目数", f"=COUNTA('联锁排障速查表'!A2:A{alarm_end_row})"])
+    for r_i in range(len(intro_data) - 3, ws_intro.max_row + 1):
+        c1 = ws_intro.cell(row=r_i, column=1)
+        c2 = ws_intro.cell(row=r_i, column=2)
+        c1.font = font_bold
+        c2.font = font_normal
+        ws_intro.row_dimensions[r_i].height = 22
+        if "率" in str(c1.value):
+            c2.number_format = "0.0%"
+
     ws_alarm.freeze_panes = "A2"
     ws_alarm.auto_filter.ref = ws_alarm.dimensions
     ws_alarm.page_setup.orientation = ws_alarm.ORIENTATION_LANDSCAPE
@@ -342,7 +397,7 @@ def create_delivery_tables(project_info: Dict[str, Any],
         f"# 《现场调试交付三表》—— {project_info.get('project_name', '工程项目')}",
         "",
         "> **工程控制器**：" + project_info.get("plc_model", "S7-1200") + "  ",
-        "> **编制日期**：" + project_info.get("date", "2026-10-28") + "  ",
+        "> **编制日期**：" + project_info.get("date", default_date) + "  ",
         "> **程序版本**：纯 LAD 梯形图 V1.0  ",
         "> **安全声明**：PLC 程序中的急停逻辑**不能替代**硬接线急停回路和安全继电器；本程序不属于安全 PLC（F-CPU）程序。",
         "",
@@ -357,7 +412,7 @@ def create_delivery_tables(project_info: Dict[str, Any],
     for idx, item in enumerate(io_list, start=1):
         addr = item.get("logical_address", "")
         ct = item.get("contact_type", "NO")
-        method, expected = _build_io_test_guidance(addr, ct)
+        method, expected = _build_io_test_guidance(addr, ct, for_markdown=True)
         md_lines.append(
             f"| {idx} | `{addr}` | `{item.get('name', '')}` | `{item.get('device_tag', '')}` | "
             f"`{item.get('page_col', '')}` | `{item.get('terminal', '')}` | **{ct}** | {item.get('description', '')} | "

@@ -5,9 +5,16 @@
     [string]$PlcScheme = "PLC_IO_Excel_Export",
     [string]$BomScheme = "BOM_Part_Excel_Export",
     [string]$W3uPath = "",
-    [string]$ConverterId = "PlcDcExchangerSiemensTIA16AML",
+    [string]$TiaVersion = "16",
+    [string]$ConverterId = "",
     [int]$TimeoutSeconds = 300
 )
+
+if ([string]::IsNullOrWhiteSpace($ConverterId)) {
+    $verClean = ($TiaVersion -replace "[^0-9]", "")
+    if (-not $verClean) { $verClean = "16" }
+    $ConverterId = "PlcDcExchangerSiemensTIA${verClean}AML"
+}
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
@@ -19,19 +26,36 @@ function Write-JsonResult($obj, [int]$exitCode = 0) {
 function Resolve-EplanW3uPath([string]$explicitPath) {
     $candidates = New-Object System.Collections.Generic.List[string]
 
-    if (-not [string]::IsNullOrWhiteSpace($explicitPath)) {
-        $trimmed = $explicitPath.Trim().Trim('"')
-        if (Test-Path $trimmed -PathType Leaf) {
-            [void]$candidates.Add($trimmed)
+    function Add-W3uCandidate([string]$rawValue) {
+        if ([string]::IsNullOrWhiteSpace($rawValue)) { return }
+        $vStr = $rawValue.Trim().Trim('"')
+        # 剥离可能附带的命令行参数
+        if ($vStr -match '^(?i)([A-Z]:\\[^"]+?\.exe)\b') {
+            $vStr = $Matches[1]
+        }
+        $probes = @(
+            $vStr,
+            (Join-Path $vStr "W3u.exe"),
+            (Join-Path $vStr "Bin\W3u.exe")
+        )
+        foreach ($probe in $probes) {
+            if ($probe.EndsWith("W3u.exe", [System.StringComparison]::OrdinalIgnoreCase) -and (Test-Path $probe -PathType Leaf)) {
+                if (-not $candidates.Contains($probe)) { [void]$candidates.Add($probe) }
+            }
         }
     }
 
-    # 1. 从注册表 HKLM\SOFTWARE\EPLAN\EPLAN W3\Platform 及其版本子项动态探测 (兼容 64/32 位视图)
+    Add-W3uCandidate $explicitPath
+
+    # 1. 从注册表 HKLM\SOFTWARE\EPLAN\EPLAN W3 及其产品/版本子项递归探测 (兼容 64/32 位视图及 SystemStartUp/SystemDirectories)
     $regRoots = @(
+        "SOFTWARE\EPLAN\EPLAN W3\Electric P8",
         "SOFTWARE\EPLAN\EPLAN W3\Platform",
+        "SOFTWARE\EPLAN\EPLAN W3\Pro Panel",
         "SOFTWARE\EPLAN\EPLAN W3"
     )
-    $valueNames = @("AppDir", "BinPath", "InstallPath", "Path", "ProgramPath", "ExePath")
+    $valueNames = @("AppDir", "BinPath", "InstallPath", "Path", "ProgramPath", "ExePath", "Root", "Main")
+    $subKeyHints = @("SystemStartUp", "SystemDirectories")
 
     foreach ($regRoot in $regRoots) {
         foreach ($view in @([Microsoft.Win32.RegistryView]::Registry64, [Microsoft.Win32.RegistryView]::Registry32)) {
@@ -41,17 +65,7 @@ function Resolve-EplanW3uPath([string]$explicitPath) {
                 if (-not $rootKey) { continue }
 
                 foreach ($vn in $valueNames) {
-                    try {
-                        $val = $rootKey.GetValue($vn)
-                        if ($val) {
-                            $vStr = "$val".Trim().Trim('"')
-                            foreach ($probe in @($vStr, (Join-Path $vStr "W3u.exe"), (Join-Path $vStr "Bin\W3u.exe"))) {
-                                if ($probe.EndsWith("W3u.exe", [System.StringComparison]::OrdinalIgnoreCase) -and (Test-Path $probe -PathType Leaf)) {
-                                    if (-not $candidates.Contains($probe)) { [void]$candidates.Add($probe) }
-                                }
-                            }
-                        }
-                    } catch {}
+                    try { Add-W3uCandidate "$($rootKey.GetValue($vn))" } catch {}
                 }
 
                 # 遍历版本子键（按名称倒序优先最新版本）
@@ -61,15 +75,16 @@ function Resolve-EplanW3uPath([string]$explicitPath) {
                         $subKey = $rootKey.OpenSubKey($subName)
                         if (-not $subKey) { continue }
                         foreach ($vn in $valueNames) {
-                            $val = $subKey.GetValue($vn)
-                            if ($val) {
-                                $vStr = "$val".Trim().Trim('"')
-                                foreach ($probe in @($vStr, (Join-Path $vStr "W3u.exe"), (Join-Path $vStr "Bin\W3u.exe"))) {
-                                    if ($probe.EndsWith("W3u.exe", [System.StringComparison]::OrdinalIgnoreCase) -and (Test-Path $probe -PathType Leaf)) {
-                                        if (-not $candidates.Contains($probe)) { [void]$candidates.Add($probe) }
-                                    }
+                            try { Add-W3uCandidate "$($subKey.GetValue($vn))" } catch {}
+                        }
+                        foreach ($hintName in $subKeyHints) {
+                            try {
+                                $hintKey = $subKey.OpenSubKey($hintName)
+                                if (-not $hintKey) { continue }
+                                foreach ($vn in $valueNames) {
+                                    try { Add-W3uCandidate "$($hintKey.GetValue($vn))" } catch {}
                                 }
-                            }
+                            } catch {}
                         }
                     } catch {}
                 }
@@ -77,22 +92,35 @@ function Resolve-EplanW3uPath([string]$explicitPath) {
         }
     }
 
-    # 2. 检查常见标准安装路径
-    $commonGlobs = @(
-        "C:\Program Files\EPLAN\Platform\*\Bin\W3u.exe",
-        "C:\Program Files\EPLAN\Electric P8\*\Bin\W3u.exe",
-        "C:\Program Files (x86)\EPLAN\Platform\*\Bin\W3u.exe",
-        "C:\Program Files (x86)\EPLAN\Electric P8\*\Bin\W3u.exe"
+    # 1b. 读取 HKCU\SOFTWARE\EPLAN\Usage\LastStartedVariantDir（记录最近一次启动的 EPLAN 变体目录）
+    try {
+        $usageKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("SOFTWARE\EPLAN\Usage")
+        if ($usageKey) {
+            Add-W3uCandidate "$($usageKey.GetValue('LastStartedVariantDir'))"
+        }
+    } catch {}
+
+    # 2. 动态扫描所有固定盘符下的标准 EPLAN 安装目录
+    $drives = @(Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Root -match '^[A-Z]:\\$' } | Select-Object -ExpandProperty Root)
+    if ($drives.Count -eq 0) { $drives = @("C:\") }
+    $relPatterns = @(
+        "Program Files\EPLAN\Electric P8\*\Bin\W3u.exe",
+        "Program Files\EPLAN\Platform\*\Bin\W3u.exe",
+        "Program Files (x86)\EPLAN\Electric P8\*\Bin\W3u.exe",
+        "Program Files (x86)\EPLAN\Platform\*\Bin\W3u.exe",
+        "EPLAN\Electric P8\*\Bin\W3u.exe",
+        "EPLAN\Platform\*\Bin\W3u.exe"
     )
-    foreach ($glob in $commonGlobs) {
-        try {
-            $found = Get-Item -Path $glob -ErrorAction SilentlyContinue | Sort-Object FullName -Descending
-            foreach ($item in $found) {
-                if (-not $candidates.Contains($item.FullName)) {
-                    [void]$candidates.Add($item.FullName)
+    foreach ($rootDir in $drives) {
+        foreach ($rel in $relPatterns) {
+            $glob = Join-Path $rootDir $rel
+            try {
+                $found = Get-Item -Path $glob -ErrorAction SilentlyContinue | Sort-Object FullName -Descending
+                foreach ($item in $found) {
+                    Add-W3uCandidate $item.FullName
                 }
-            }
-        } catch {}
+            } catch {}
+        }
     }
 
     $selected = if ($candidates.Count -gt 0) { $candidates[0] } else { "" }
@@ -132,6 +160,9 @@ function Invoke-W3uCommand([string]$exePath, [string[]]$argList, [int]$timeoutSe
             Command  = "`"$exePath`" $($psi.Arguments)"
         }
     }
+    # 异步读取 StdOut/StdErr 防止子进程输出超过管道缓冲区触发 WaitForExit 死锁
+    $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+    $stderrTask = $proc.StandardError.ReadToEndAsync()
     $finished = $proc.WaitForExit($timeoutSec * 1000)
     if (-not $finished) {
         try { $proc.Kill() } catch {}
@@ -143,8 +174,8 @@ function Invoke-W3uCommand([string]$exePath, [string[]]$argList, [int]$timeoutSe
             Command  = "`"$exePath`" $($psi.Arguments)"
         }
     }
-    $stdout = $proc.StandardOutput.ReadToEnd()
-    $stderr = $proc.StandardError.ReadToEnd()
+    $stdout = $stdoutTask.GetAwaiter().GetResult()
+    $stderr = $stderrTask.GetAwaiter().GetResult()
     return [PSCustomObject]@{
         Success  = ($proc.ExitCode -eq 0)
         ExitCode = $proc.ExitCode

@@ -27,6 +27,19 @@ import sys
 import xml.etree.ElementTree as ET
 from typing import List, Dict, Set, Tuple, Any, Optional
 
+try:
+    from common_utils import (
+        SUPPORTED_TIA_VERSIONS,
+        ensure_utf8_stdout,
+        parse_address_bit_span,
+    )
+except ImportError:
+    from scripts.common_utils import (  # type: ignore
+        SUPPORTED_TIA_VERSIONS,
+        ensure_utf8_stdout,
+        parse_address_bit_span,
+    )
+
 IQ_NAME_RE = re.compile(r"^[A-Z]{1,3}\d{1,3}[A-Z]?_[\u4e00-\u9fa5A-Za-z0-9_]+$")
 M_NAME_RE = re.compile(r"^(?:M(?:B|W|D)?\d*|ALM|ERR|ST|STEP|CNT|HMI)_[\u4e00-\u9fa5A-Za-z0-9_]+$")
 EPLAN_COMMENT_RE = re.compile(r"^\[\s*[^|\]]+\s*\|\s*[^|\]]+\s*\|\s*[^|\]]+\s*\]")
@@ -34,6 +47,7 @@ SAFETY_KEYWORDS = ("急停", "热继", "停止", "极限", "限位", "安全门"
 SAFETY_PERMISSIVE_TAGS = {"M_急停正常", "M_安全条件满足"}
 ALARM_OR_LAMP_KEYWORDS = ("报警", "故障", "ALM", "ERR", "急停灯", "故障灯", "指示", "信号灯", "蜂鸣", "HL", "PF")
 ACTUATOR_PREFIX_OR_KEYWORDS = ("KM", "YV", "MB", "接触器", "电磁阀", "变频器", "电机", "正转", "反转", "星", "角", "伸出", "缩回")
+COIL_PART_NAMES = {"Coil", "SCoil", "RCoil", "NCoil", "PCoil"}
 
 # 常见 LAD 元件必需连接的引脚集合
 REQUIRED_PART_PINS: Dict[str, Set[str]] = {
@@ -41,7 +55,8 @@ REQUIRED_PART_PINS: Dict[str, Set[str]] = {
     "Coil": {"in", "operand"},
     "SCoil": {"in", "operand"},
     "RCoil": {"in", "operand"},
-    "NCoil": {"in", "operand"},
+    "NCoil": {"in", "bit", "operand"},
+    "PCoil": {"in", "bit", "operand"},
     "PBox": {"in", "bit", "out"},
     "NBox": {"in", "bit", "out"},
     "TON": {"IN", "PT", "ET"},
@@ -89,48 +104,6 @@ def resolve_project_path(path_str: Optional[str]) -> Optional[str]:
     if os.path.exists(alt_in_proj):
         return alt_in_proj
     return path_str
-
-
-def parse_address_bit_span(logical_addr: str, data_type: str = "Bool") -> Optional[Tuple[str, int, int]]:
-    """
-    将西门子逻辑地址解析为 (区域, 起始绝对位偏移, 占用位数)。
-    例如:
-      %I0.0   -> ('I', 0, 1)
-      %MB10   -> ('M', 80, 8)
-      %MW30   -> ('M', 240, 16)
-      %MD200  -> ('M', 1600, 32)
-    """
-    addr = (logical_addr or "").strip().upper()
-    bit_m = re.match(r"^%([IQM])(\d+)\.([0-7])$", addr)
-    if bit_m:
-        area = bit_m.group(1)
-        byte_idx = int(bit_m.group(2))
-        bit_idx = int(bit_m.group(3))
-        return area, byte_idx * 8 + bit_idx, 1
-
-    width_m = re.match(r"^%([IQM])([BWD])(\d+)$", addr)
-    if width_m:
-        area = width_m.group(1)
-        size_code = width_m.group(2)
-        byte_idx = int(width_m.group(3))
-        width_bits = {"B": 8, "W": 16, "D": 32}[size_code]
-        return area, byte_idx * 8, width_bits
-
-    # 无 B/W/D 前缀的纯字节地址兜底（按数据类型推算宽度）
-    plain_m = re.match(r"^%([IQM])(\d+)$", addr)
-    if plain_m:
-        area = plain_m.group(1)
-        byte_idx = int(plain_m.group(2))
-        dt = (data_type or "Byte").strip().lower()
-        if dt in ("word", "int", "uint", "s5time"):
-            width_bits = 16
-        elif dt in ("dword", "dint", "udint", "real", "time", "tod"):
-            width_bits = 32
-        else:
-            width_bits = 8
-        return area, byte_idx * 8, width_bits
-
-    return None
 
 
 class ValidationResult(tuple):
@@ -364,6 +337,7 @@ _PART_POWER_LINKS: Dict[str, List[Tuple[str, str]]] = {
     "SCoil": [("in", "out")],
     "RCoil": [("in", "out")],
     "NCoil": [("in", "out")],
+    "PCoil": [("in", "out")],
     "PBox": [("in", "out")],
     "NBox": [("in", "out")],
     "TON": [("IN", "Q")],
@@ -440,17 +414,15 @@ def _power_reachable(edges: Dict[Any, Set[Any]], goal: Any, blocked: Optional[Tu
     return False
 
 
-def series_contacts_of_coil(
+def series_contacts_of_target(
     edges: Dict[Any, Set[Any]],
-    coil_uid: str,
+    goal: Any,
     contact_uids: List[str],
 ) -> Optional[List[str]]:
     """
-    计算指定线圈的必经串联触点 UId 列表（割点判定）：
-    断开触点 X 的 in->out 通路后若左母线到线圈 in 不再可达，则 X 与该线圈串联。
-    线圈不可达时返回 None。
+    计算指定目标节点（如 (coil_uid, 'in') 或 (call_uid, 'en')）的必经串联触点 UId 列表（割点判定）：
+    断开触点 X 的 in->out 通路后若左母线到目标节点不再可达，则 X 与目标串联。目标不可达时返回 None。
     """
-    goal = (coil_uid, "in")
     if not _power_reachable(edges, goal):
         return None
     return [
@@ -459,17 +431,27 @@ def series_contacts_of_coil(
     ]
 
 
+def series_contacts_of_coil(
+    edges: Dict[Any, Set[Any]],
+    coil_uid: str,
+    contact_uids: List[str],
+) -> Optional[List[str]]:
+    """计算指定线圈的必经串联触点 UId 列表（割点判定）"""
+    return series_contacts_of_target(edges, (coil_uid, "in"), contact_uids)
+
+
 def validate_single_xml(
     file_path: str,
     known_tags: Optional[Set[str]] = None,
     known_db_members: Optional[Dict[str, Set[str]]] = None,
     tag_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
+    allowed_versions: Optional[Tuple[str, ...]] = None,
 ) -> Tuple[List[str], Dict[str, Any]]:
     """
     单文件全量静态语法与内部拓扑校验。
     返回:
       errors: 语法与格式错误列表
-      block_audit_info: 用于跨文件深度审计的元数据（包含线圈调用、变量读写统计、程序段拓扑等）
+      block_audit_info: 用于跨文件深度审计的元数据（包含线圈调用、FB调用实参、变量读写统计、程序段拓扑等）
     """
     errors: List[str] = []
     fname = os.path.basename(file_path)
@@ -483,7 +465,8 @@ def validate_single_xml(
         "var_reads": [],    # list of (var_name, nw_idx, reason)
         "referenced_vars": set(),
         "called_fcs": set(),
-        "networks": [],     # list of dict: {nw_idx, contacts: [(var, negated)], coils: [(var, coil_type)]}
+        "output_params": set(),
+        "networks": [],     # list of dict: {nw_idx, contacts, coils, series, fb_calls}
     }
 
     if not os.path.exists(file_path):
@@ -506,16 +489,17 @@ def validate_single_xml(
     ):
         errors.append(f"[{fname}] 严重违背最高原则 R2：检测到 SCL 代码特征！")
 
-    # 3. XML 结构解析与 Engineering 版本检查
+    # 3. XML 结构解析与 Engineering 版本检查 (支持 V16–V20 或指定版本列表)
     try:
         root = ET.fromstring(content.lstrip("\ufeff"))
     except Exception as e:
         return [f"[{fname}] XML 语法解析失败: {str(e)}"], audit_info
 
+    valid_versions = allowed_versions or SUPPORTED_TIA_VERSIONS
     eng = root.find("Engineering")
-    if eng is None or eng.attrib.get("version") != "V16":
-        ver = eng.attrib.get("version") if eng is not None else "缺失"
-        errors.append(f"[{fname}] Engineering version 必须为 'V16'，当前为 '{ver}'")
+    ver = (eng.attrib.get("version") or "").strip() if eng is not None else "缺失"
+    if eng is None or ver not in valid_versions:
+        errors.append(f"[{fname}] Engineering version 必须属于 {valid_versions}，当前为 '{ver}'")
 
     # 识别块类型与块名称
     fc_elem = root.find(".//SW.Blocks.FC")
@@ -580,10 +564,13 @@ def validate_single_xml(
         if sections_el is not None:
             has_interface_sections = True
             for sec_el in sections_el.findall("{*}Section"):
+                sec_name = sec_el.attrib.get("Name", "")
                 for mem in sec_el.findall("{*}Member"):
                     m_name = mem.attrib.get("Name")
                     if m_name:
                         local_members.add(m_name)
+                        if sec_name in ("Output", "InOut"):
+                            audit_info["output_params"].add(m_name)
     audit_info["called_blocks"] = set()
 
     # 检查块编程语言必须为 LAD (或 GlobalDB 的 DB)
@@ -687,6 +674,8 @@ def validate_single_xml(
                             "name": ci_name,
                             "block_type": ci_btype,
                             "param_sections": param_sections,
+                            "in_bindings": {},
+                            "out_bindings": {},
                             "negated": False,
                             "elem": child,
                         }
@@ -874,13 +863,19 @@ def validate_single_xml(
                             param_sec = p_info.get("param_sections", {}).get(pin, "")
                             if param_sec == "Output" or pin == "Ret_Val" or pin.lower() == "eno":
                                 audit_info["var_writes"].append((sym_name, nw_idx, f"Call:{p_part_name}:{pin}"))
+                                if pin != "Ret_Val" and pin.lower() != "eno":
+                                    p_info.setdefault("out_bindings", {}).setdefault(pin, []).append(sym_name)
                             elif param_sec == "InOut":
                                 audit_info["var_reads"].append((sym_name, nw_idx, f"Call:{p_part_name}:{pin}"))
                                 audit_info["var_writes"].append((sym_name, nw_idx, f"Call:{p_part_name}:{pin}"))
+                                p_info.setdefault("in_bindings", {}).setdefault(pin, []).append(sym_name)
+                                p_info.setdefault("out_bindings", {}).setdefault(pin, []).append(sym_name)
                             else:
                                 audit_info["var_reads"].append((sym_name, nw_idx, f"Call:{p_part_name}:{pin}"))
+                                if pin.lower() != "en":
+                                    p_info.setdefault("in_bindings", {}).setdefault(pin, []).append(sym_name)
                         elif pin == "operand":
-                            if p_part_name in ("Coil", "SCoil", "RCoil", "NCoil"):
+                            if p_part_name in COIL_PART_NAMES:
                                 audit_info["coils"].append((sym_name, nw_idx, p_part_name))
                                 audit_info["var_writes"].append((sym_name, nw_idx, p_part_name))
                                 nw_coils.append((sym_name, p_part_name))
@@ -904,9 +899,38 @@ def validate_single_xml(
                                 audit_info["var_reads"].append((sym_name, nw_idx, f"{p_part_name}:{pin}"))
 
         nw_series_by_coil: Dict[str, List[Tuple[str, bool]]] = {}
-        if wires_elem is not None and coil_uid_list:
+        nw_fb_calls: List[Dict[str, Any]] = []
+        nw_contact_targets: List[Tuple[str, bool, List[Tuple[str, str]]]] = []
+        fb_call_uids = [
+            uid for uid, pinfo in part_info_by_uid.items()
+            if pinfo.get("tag") == "Call" and pinfo.get("block_type") == "FB"
+        ]
+        if wires_elem is not None and (coil_uid_list or fb_call_uids):
             edges = build_power_graph(wires_elem, part_info_by_uid)
             c_uids = list(contact_uid_to_var.keys())
+            coil_in_map: Dict[Tuple[str, str], Tuple[str, str]] = {
+                (cu, "in"): (cv, ct) for cu, cv, ct in coil_uid_list
+            }
+            for cu in c_uids:
+                seen_nodes: Set[Any] = {(cu, "out")}
+                q_nodes: deque = deque([(cu, "out")])
+                downstream: List[Tuple[str, str]] = []
+                while q_nodes:
+                    cur_node = q_nodes.popleft()
+                    if cur_node in coil_in_map:
+                        hit = coil_in_map[cur_node]
+                        if hit not in downstream:
+                            downstream.append(hit)
+                    for nxt_node in edges.get(cur_node, ()):
+                        if nxt_node not in seen_nodes:
+                            seen_nodes.add(nxt_node)
+                            q_nodes.append(nxt_node)
+                nw_contact_targets.append((
+                    contact_uid_to_var[cu],
+                    bool(part_info_by_uid[cu].get("negated")),
+                    downstream,
+                ))
+
             for coil_uid, coil_var, _ in coil_uid_list:
                 sc = series_contacts_of_coil(edges, coil_uid, c_uids)
                 if sc is None:
@@ -925,11 +949,28 @@ def validate_single_xml(
                     prev_set = set(nw_series_by_coil[coil_var])
                     nw_series_by_coil[coil_var] = [x for x in cur_series if x in prev_set]
 
+            for call_uid in fb_call_uids:
+                pinfo = part_info_by_uid[call_uid]
+                sc_en = series_contacts_of_target(edges, (call_uid, "en"), c_uids)
+                en_series = (
+                    [(contact_uid_to_var[u], bool(part_info_by_uid[u].get("negated"))) for u in sc_en]
+                    if sc_en is not None else []
+                )
+                nw_fb_calls.append({
+                    "fb_name": pinfo.get("name", ""),
+                    "en_series": en_series,
+                    "in_bindings": dict(pinfo.get("in_bindings", {})),
+                    "out_bindings": dict(pinfo.get("out_bindings", {})),
+                })
+
         audit_info["networks"].append({
             "nw_idx": nw_idx,
+            "title": title_text,
             "contacts": nw_contacts,
             "coils": nw_coils,
             "series": nw_series_by_coil,
+            "fb_calls": nw_fb_calls,
+            "contact_targets": nw_contact_targets,
         })
 
         # 校验核心 Part（Contact/Coil/PBox/O/TON 等）必需引脚完整性
@@ -1107,6 +1148,148 @@ def compare_eplan_with_tia_hw(
     return hw_errors, hw_warnings, report_lines
 
 
+def _build_fb_output_series_map(audit_list: List[Dict[str, Any]]) -> Dict[str, Dict[str, List[Tuple[str, bool]]]]:
+    """
+    为每个功能块 FB 计算各 Output/InOut 形参的内部必经串联局部形参/成员列表：
+      fb_output_series[fb_name][out_param] = [(local_var_name_no_hash, is_negated), ...]
+    """
+    fb_output_series: Dict[str, Dict[str, List[Tuple[str, bool]]]] = {}
+    for audit_info in audit_list:
+        if audit_info.get("block_type") != "FB":
+            continue
+        fb_name = audit_info.get("block_name") or ""
+        if not fb_name:
+            continue
+
+        direct_local: Dict[str, List[Tuple[str, bool]]] = {}
+        for nw in audit_info.get("networks", []):
+            series_map = nw.get("series", {})
+            for cname, ctype in nw.get("coils", []):
+                if ctype not in ("Coil", "SCoil"):
+                    continue
+                clean_c = cname.lstrip("#")
+                pairs: List[Tuple[str, bool]] = []
+                for cv, neg in series_map.get(cname, []):
+                    clean_v = cv.lstrip("#")
+                    if clean_v and clean_v != clean_c:
+                        pairs.append((clean_v, bool(neg)))
+                if clean_c not in direct_local:
+                    direct_local[clean_c] = pairs
+
+        out_map: Dict[str, List[Tuple[str, bool]]] = {}
+        for out_param in audit_info.get("output_params", set()):
+            if out_param not in direct_local:
+                continue
+            collected: List[Tuple[str, bool]] = list(direct_local[out_param])
+            seen_pairs = set(collected)
+            queue = [v for v, neg in collected if not neg and v in direct_local]
+            visited_vars: Set[str] = {out_param}
+            while queue:
+                cur_v = queue.pop(0)
+                if cur_v in visited_vars:
+                    continue
+                visited_vars.add(cur_v)
+                for dv, dneg in direct_local.get(cur_v, []):
+                    if (dv, dneg) not in seen_pairs:
+                        seen_pairs.add((dv, dneg))
+                        collected.append((dv, dneg))
+                    if not dneg and dv in direct_local and dv not in visited_vars:
+                        queue.append(dv)
+            out_map[out_param] = collected
+
+        if out_map:
+            fb_output_series[fb_name] = out_map
+    return fb_output_series
+
+
+def extract_project_coil_series(
+    audit_list: List[Dict[str, Any]],
+) -> Tuple[Dict[str, List[Tuple[str, int, List[Tuple[str, bool]]]]], Dict[str, List[Tuple[str, bool]]]]:
+    """
+    统一汇总全工程线圈驱动及其必经串联主干路触点：
+      1. 直接的 Coil / SCoil 驱动；
+      2. 通过 <Call BlockType="FB"> 绑定 Output/InOut 实参驱动的等效线圈（穿透 FB 内部串联拓扑映射回调用实参）。
+    """
+    fb_output_series = _build_fb_output_series_map(audit_list)
+    coil_series: Dict[str, List[Tuple[str, int, List[Tuple[str, bool]]]]] = {}
+    var_direct_series: Dict[str, List[Tuple[str, bool]]] = {}
+
+    for audit_info in audit_list:
+        fname = audit_info.get("file", "")
+        if fname in TEMPLATE_GALLERY_FILES or audit_info.get("block_type") not in ("OB", "FC", "FB"):
+            continue
+        bname = audit_info.get("block_name") or fname
+
+        for nw in audit_info.get("networks", []):
+            nw_idx = nw["nw_idx"]
+            series_map = nw.get("series", {})
+
+            # 1. 直接 Coil / SCoil 驱动（OB/FC/FB 均收集，后续按块类型过滤业务逻辑）
+            for cname, ctype in nw.get("coils", []):
+                if ctype not in ("Coil", "SCoil"):
+                    continue
+                series_pairs = [
+                    (cv, bool(neg))
+                    for cv, neg in series_map.get(cname, [])
+                    if cv != cname
+                ]
+                coil_series.setdefault(cname, []).append((bname, nw_idx, series_pairs))
+                if cname not in var_direct_series:
+                    var_direct_series[cname] = list(series_pairs)
+
+            # 2. FB 调用实参穿透映射
+            for fb_call in nw.get("fb_calls", []):
+                callee_fb = fb_call.get("fb_name", "")
+                fb_out_deps = fb_output_series.get(callee_fb, {})
+                in_bindings = fb_call.get("in_bindings", {})
+                out_bindings = fb_call.get("out_bindings", {})
+                en_series = list(fb_call.get("en_series", []))
+
+                for out_param, ext_out_vars in out_bindings.items():
+                    local_deps = fb_out_deps.get(out_param, [])
+                    mapped_series: List[Tuple[str, bool]] = list(en_series)
+                    for local_in, is_neg in local_deps:
+                        for ext_in_var in in_bindings.get(local_in, []):
+                            pair = (ext_in_var, bool(is_neg))
+                            if pair not in mapped_series:
+                                mapped_series.append(pair)
+                    for ext_out_var in ext_out_vars:
+                        clean_pairs = [p for p in mapped_series if p[0] != ext_out_var]
+                        coil_series.setdefault(ext_out_var, []).append((bname, nw_idx, clean_pairs))
+                        if ext_out_var not in var_direct_series:
+                            var_direct_series[ext_out_var] = list(clean_pairs)
+
+    return coil_series, var_direct_series
+
+
+def collect_project_coil_series(
+    xml_dirs: List[str],
+    allowed_versions: Optional[Tuple[str, ...]] = None,
+) -> Tuple[Dict[str, List[Tuple[str, int, List[Tuple[str, bool]]]]], Dict[str, List[Tuple[str, bool]]]]:
+    """扫描 XML 目录集合并提取全工程统一线圈串联拓扑映射（供 Safety Critic 复用）"""
+    xml_files: List[str] = []
+    for d in xml_dirs:
+        if os.path.isdir(d):
+            for fn in sorted(os.listdir(d)):
+                if fn.lower().endswith(".xml"):
+                    fp = os.path.join(d, fn)
+                    if fp not in xml_files:
+                        xml_files.append(fp)
+
+    known_tags, known_db_members, _, tag_metadata = collect_defined_symbols(xml_files)
+    audit_list: List[Dict[str, Any]] = []
+    for fp in xml_files:
+        _, audit_info = validate_single_xml(
+            fp,
+            known_tags=known_tags or None,
+            known_db_members=known_db_members or None,
+            tag_metadata=tag_metadata,
+            allowed_versions=allowed_versions,
+        )
+        audit_list.append(audit_info)
+    return extract_project_coil_series(audit_list)
+
+
 def _audit_safety_rules(
     audit_list: List[Dict[str, Any]],
     tag_metadata: Dict[str, Dict[str, Any]],
@@ -1114,13 +1297,15 @@ def _audit_safety_rules(
     all_warnings: List[str],
 ) -> None:
     """
-    执行安全规则 S2 ~ S5 自动审计（基于能流拓扑的必经串联触点判定）：
+    执行安全规则 S2 ~ S5 自动审计（基于能流拓扑的必经串联触点判定，同时穿透 FB 调用实参）：
       - S2: NC 安全输入信号严禁在驱动非报警/非指示灯的回路中以常闭触点 (Negated) 扫描
       - S3: 物理执行器线圈 (%Q 接触器/电磁阀/驱动) 必须在串联主干路上直接或间接串入安全允许条件
-      - S4: 同 FC 内正反转、星三角接触器必须在串联主干路上互相串入对方的常闭触点 (软件互锁)
+      - S4: 同块内正反转、星三角接触器必须在串联主干路上互相串入对方的常闭触点 (软件互锁)
       - S5: 存在热继电器输入时，电机接触器线圈 (%Q) 串联主干路必须直接或间接串入热继常开扫描
     """
-    # 1. 预计算安全许可传递闭包（支持经主接触器等上游线圈常开串联传递，禁止自身自锁绕过）
+    coil_series, _ = extract_project_coil_series(audit_list)
+
+    # 1. 预计算安全许可传递闭包（支持经主接触器/FB输出等上游线圈常开串联传递，禁止自身自锁绕过）
     safety_covered: Set[str] = set(SAFETY_PERMISSIVE_TAGS)
     for tname in tag_metadata:
         if _is_safety_permissive_var(tname, tag_metadata):
@@ -1134,26 +1319,14 @@ def _audit_safety_rules(
     changed = True
     while changed:
         changed = False
-        for audit_info in audit_list:
-            fname = audit_info.get("file", "")
-            if fname in TEMPLATE_GALLERY_FILES or audit_info.get("block_type") not in ("FC", "FB"):
+        for cname, occs in coil_series.items():
+            if _is_alarm_or_lamp_target(cname):
                 continue
-            for nw in audit_info.get("networks", []):
-                coils = nw["coils"]
-                if not coils:
-                    continue
-                coil_names = [c[0] for c in coils]
-                if all(_is_alarm_or_lamp_target(cn) for cn in coil_names):
-                    continue
-                series_map = nw.get("series", {})
-                for cname, ctype in coils:
-                    if ctype not in ("Coil", "SCoil"):
-                        continue
-                    series_cts = series_map.get(cname, [])
-                    if any((not is_neg) and cv != cname and cv in safety_covered for cv, is_neg in series_cts):
-                        if cname not in safety_covered:
-                            safety_covered.add(cname)
-                            changed = True
+            for _, _, series_cts in occs:
+                if any((not is_neg) and cv != cname and cv in safety_covered for cv, is_neg in series_cts):
+                    if cname not in safety_covered:
+                        safety_covered.add(cname)
+                        changed = True
 
     # 2. 预计算每个变量受哪些热继电器保护（仅统计串联主干路常开触点传递，排除自锁与 RCoil）
     fr_tags: Set[str] = {
@@ -1166,75 +1339,109 @@ def _audit_safety_rules(
         changed = True
         while changed:
             changed = False
-            for audit_info in audit_list:
-                fname = audit_info.get("file", "")
-                if fname in TEMPLATE_GALLERY_FILES or audit_info.get("block_type") not in ("FC", "FB"):
+            for cname, occs in coil_series.items():
+                if _is_alarm_or_lamp_target(cname):
                     continue
-                for nw in audit_info.get("networks", []):
-                    coils = nw["coils"]
-                    if not coils:
-                        continue
-                    coil_names = [c[0] for c in coils]
-                    if all(_is_alarm_or_lamp_target(cn) for cn in coil_names):
-                        continue
-                    series_map = nw.get("series", {})
-                    for cname, ctype in coils:
-                        if ctype not in ("Coil", "SCoil"):
-                            continue
-                        nw_frs: Set[str] = set()
-                        for cv, is_neg in series_map.get(cname, []):
-                            if (not is_neg) and cv != cname and (cv in fr_coverage):
-                                nw_frs.update(fr_coverage[cv])
-                        if nw_frs:
-                            cur_set = fr_coverage.setdefault(cname, set())
-                            before_len = len(cur_set)
-                            cur_set.update(nw_frs)
-                            if len(cur_set) > before_len:
-                                changed = True
+                for _, _, series_cts in occs:
+                    nw_frs: Set[str] = set()
+                    for cv, is_neg in series_cts:
+                        if (not is_neg) and cv != cname and (cv in fr_coverage):
+                            nw_frs.update(fr_coverage[cv])
+                    if nw_frs:
+                        cur_set = fr_coverage.setdefault(cname, set())
+                        before_len = len(cur_set)
+                        cur_set.update(nw_frs)
+                        if len(cur_set) > before_len:
+                            changed = True
+
+    # 合并 FB 调用穿透得到的等效执行器驱动记录，按所属文件分组审计 S3/S4/S5
+    fb_output_series = _build_fb_output_series_map(audit_list)
 
     for audit_info in audit_list:
         fname = audit_info.get("file", "")
         # 纯样板画廊文件豁免业务逻辑审计
-        if fname in TEMPLATE_GALLERY_FILES or audit_info.get("block_type") not in ("FC", "FB"):
+        if fname in TEMPLATE_GALLERY_FILES or audit_info.get("block_type") not in ("OB", "FC", "FB"):
             continue
 
         networks = audit_info.get("networks", [])
+        fc_q_coils: List[Tuple[int, str, List[Tuple[str, bool]]]] = []
 
-        # S2, S3 & S5 单段校验
+        # S2, S3 & S5 单段校验（含直接 Coil/SCoil 与 FB Output 实参驱动）
         for nw in networks:
             nw_idx = nw["nw_idx"]
             contacts = nw["contacts"]
             coils = nw["coils"]
             series_map = nw.get("series", {})
-            if not coils:
-                continue
 
             coil_names = [c[0] for c in coils]
-            all_coils_are_alarm_or_lamp = all(_is_alarm_or_lamp_target(cname) for cname in coil_names)
+            all_coils_are_alarm_or_lamp = bool(coil_names) and all(_is_alarm_or_lamp_target(cname) for cname in coil_names)
 
-            # S2: 安全信号在控制使能回路不得取反 (Negated)
-            if not all_coils_are_alarm_or_lamp:
-                for c_var, is_neg in contacts:
-                    if is_neg and _is_safety_input_var(c_var, tag_metadata):
-                        all_errors.append(
-                            f"[{fname} 程序段 {nw_idx}] 安全信号极性违规 ERROR (S2): "
-                            f"常闭安全信号 '{c_var}' 在控制输出回路 ({', '.join(coil_names)}) 中被写成了常闭触点 (Negated)！"
-                            f"按 Fail-Safe 原则应使用常开触点扫描。"
-                        )
+            # S2: 安全信号在控制使能回路不得取反 (Negated)，按实际能流可达的下游线圈精准判定（兼容同段混合报警/RCoil支路）
+            if audit_info.get("block_type") in ("FC", "FB"):
+                contact_targets = nw.get("contact_targets") or []
+                if contact_targets:
+                    for c_var, is_neg, downstream_coils in contact_targets:
+                        if not (is_neg and _is_safety_input_var(c_var, tag_metadata)):
+                            continue
+                        if downstream_coils:
+                            bad_targets = [
+                                dv for dv, dt in downstream_coils
+                                if not (_is_alarm_or_lamp_target(dv) or dt == "RCoil")
+                            ]
+                            if bad_targets:
+                                all_errors.append(
+                                    f"[{fname} 程序段 {nw_idx}] 安全信号极性违规 ERROR (S2): "
+                                    f"常闭安全信号 '{c_var}' 在控制输出回路 ({', '.join(bad_targets)}) 中被写成了常闭触点 (Negated)！"
+                                    f"按 Fail-Safe 原则应使用常开触点扫描。"
+                                )
+                        elif not all_coils_are_alarm_or_lamp:
+                            all_errors.append(
+                                f"[{fname} 程序段 {nw_idx}] 安全信号极性违规 ERROR (S2): "
+                                f"常闭安全信号 '{c_var}' 在控制输出回路 ({', '.join(coil_names)}) 中被写成了常闭触点 (Negated)！"
+                                f"按 Fail-Safe 原则应使用常开触点扫描。"
+                            )
+                elif not all_coils_are_alarm_or_lamp:
+                    for c_var, is_neg in contacts:
+                        if is_neg and _is_safety_input_var(c_var, tag_metadata):
+                            all_errors.append(
+                                f"[{fname} 程序段 {nw_idx}] 安全信号极性违规 ERROR (S2): "
+                                f"常闭安全信号 '{c_var}' 在控制输出回路 ({', '.join(coil_names)}) 中被写成了常闭触点 (Negated)！"
+                                f"按 Fail-Safe 原则应使用常开触点扫描。"
+                            )
 
-            # S3 & S5: 驱动物理执行器 %Q 必须在串联主干路串入安全允许条件；电机接触器须串联热继
+            # 收集本段直接线圈 + FB Output 穿透线圈
+            effective_coils: List[Tuple[str, List[Tuple[str, bool]]]] = []
             for cname, ctype in coils:
-                if ctype not in ("Coil", "SCoil"):
-                    continue
+                if ctype in ("Coil", "SCoil"):
+                    effective_coils.append((cname, series_map.get(cname, [])))
+
+            for fb_call in nw.get("fb_calls", []):
+                callee_fb = fb_call.get("fb_name", "")
+                fb_out_deps = fb_output_series.get(callee_fb, {})
+                in_bindings = fb_call.get("in_bindings", {})
+                en_series = list(fb_call.get("en_series", []))
+                for out_param, ext_out_vars in fb_call.get("out_bindings", {}).items():
+                    mapped_series = list(en_series)
+                    for local_in, is_neg in fb_out_deps.get(out_param, []):
+                        for ext_in_var in in_bindings.get(local_in, []):
+                            pair = (ext_in_var, bool(is_neg))
+                            if pair not in mapped_series:
+                                mapped_series.append(pair)
+                    for ext_out_var in ext_out_vars:
+                        effective_coils.append((ext_out_var, mapped_series))
+
+            for cname, series_cts in effective_coils:
                 meta = tag_metadata.get(cname, {})
                 addr = meta.get("address", "").upper()
+                if addr.startswith("%Q") and not _is_alarm_or_lamp_target(cname):
+                    fc_q_coils.append((nw_idx, cname, series_cts))
+
                 is_q_actuator = (
                     addr.startswith("%Q")
                     and not _is_alarm_or_lamp_target(cname)
                     and any(k in cname for k in ACTUATOR_PREFIX_OR_KEYWORDS)
                 )
                 if is_q_actuator:
-                    series_cts = series_map.get(cname, [])
                     has_safety = any(
                         (not is_neg) and cv != cname and cv in safety_covered
                         for cv, is_neg in series_cts
@@ -1265,18 +1472,7 @@ def _audit_safety_rules(
                                 f"电机输出 '{cname}' ({addr}) 的串联控制回路未直接或间接串入热继电器常开扫描 ({', '.join(sorted(fr_tags))})！"
                             )
 
-        # S4: 同 FC 内正反转 / 星三角软件互锁检查（仅认串联主干路中的常闭互锁触点）
-        fc_q_coils: List[Tuple[int, str, List[Tuple[str, bool]]]] = []
-        for nw in networks:
-            series_map = nw.get("series", {})
-            for cname, ctype in nw["coils"]:
-                if ctype not in ("Coil", "SCoil"):
-                    continue
-                meta = tag_metadata.get(cname, {})
-                addr = meta.get("address", "").upper()
-                if addr.startswith("%Q") and not _is_alarm_or_lamp_target(cname):
-                    fc_q_coils.append((nw["nw_idx"], cname, series_map.get(cname, [])))
-
+        # S4: 同块内正反转 / 星三角软件互锁检查（仅认串联主干路中的常闭互锁触点）
         def _check_mutual_pair(kw_a: str, kw_b: str, desc_label: str) -> None:
             group_a = [item for item in fc_q_coils if kw_a in item[1]]
             group_b = [item for item in fc_q_coils if kw_b in item[1]]
@@ -1298,15 +1494,137 @@ def _audit_safety_rules(
         _check_mutual_pair("星", "角", "星三角")
 
 
+_SEMANTIC_M_EXEMPT_KEYWORDS = (
+    "步序", "STEP", "报警", "故障", "汇总", "模式", "请求", "授权",
+    "就绪", "原点", "原位", "安全", "运行中", "仿真", "HMI", "备用",
+    "预留", "边沿", "记忆", "急停正常",
+)
+_TRANSITORY_M_HINT_KEYWORDS = ("过渡", "脉冲到达", "延时完成", "TIM_DONE")
+
+
+def audit_anti_fragmentation(
+    collected_audits: List[Dict[str, Any]],
+    tag_metadata: Dict[str, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    反碎片化静态审计：识别导致“程序段碎、过渡M位多、空壳FC多”的三类反模式（排除样板与FC99仿真块）：
+      1. FRAG_TRANSITORY_M: 同块内 1 写(Coil) 1 读(Contact) 且无自锁的一次性冗余过渡 %M 桥接位
+      2. FRAG_SPLIT_SR: 同块内同一变量的 SCoil 与 RCoil 被拆到不同程序段
+      3. FRAG_MINI_FC: 仅含 1 个程序段的迷你空壳业务 FC
+    """
+    findings: List[Dict[str, Any]] = []
+
+    m_writes: Dict[str, List[Tuple[str, int, str]]] = defaultdict(list)
+    m_reads: Dict[str, List[Tuple[str, int, str]]] = defaultdict(list)
+
+    for audit_info in collected_audits:
+        fname = audit_info.get("file", "")
+        btype = audit_info.get("block_type")
+        bname = audit_info.get("block_name") or fname
+        if fname in TEMPLATE_GALLERY_FILES or btype not in ("FC", "FB"):
+            continue
+        if str(bname).upper().startswith("FC99"):
+            continue
+
+        networks = audit_info.get("networks", [])
+        # 1. 检测仅含 1 个程序段的迷你空壳业务 FC
+        if btype == "FC" and len(networks) == 1:
+            findings.append({
+                "code": "FRAG_MINI_FC",
+                "block": bname,
+                "network": 1,
+                "target": bname,
+                "message": (
+                    f"[{fname}] 反碎片化审计 (FRAG_MINI_FC): 业务功能块 '{bname}' 仅包含 1 个程序段，"
+                    f"请按项目规模合并至公用块（如将报警与指示灯合并为 FC90_全局报警与指示灯，或单机项目收敛为 FC1+FC2）。"
+                ),
+                "directive": f"合并迷你功能块 '{bname}' 至所属工位/公用功能块，并在 OB1_Main 更新调用列表。",
+            })
+
+        # 2. 检测同块内跨段拆分的 SCoil / RCoil
+        sr_nws: Dict[str, Dict[str, Set[int]]] = defaultdict(lambda: {"SCoil": set(), "RCoil": set()})
+        for nw in networks:
+            nw_idx = nw["nw_idx"]
+            for cname, ctype in nw.get("coils", []):
+                if ctype in ("SCoil", "RCoil"):
+                    sr_nws[cname][ctype].add(nw_idx)
+        for cname, buckets in sorted(sr_nws.items()):
+            s_set = buckets["SCoil"]
+            r_set = buckets["RCoil"]
+            if s_set and r_set and (s_set != r_set or len(s_set | r_set) > 1):
+                findings.append({
+                    "code": "FRAG_SPLIT_SR",
+                    "block": bname,
+                    "network": min(s_set | r_set),
+                    "target": cname,
+                    "message": (
+                        f"[{fname}] 反碎片化审计 (FRAG_SPLIT_SR): 变量 '{cname}' 的置位 SCoil (NW{sorted(s_set)}) "
+                        f"与复位 RCoil (NW{sorted(r_set)}) 被拆至不同程序段，请使用 build_sr_latch_network 或 build_timeout_alarm_network 合为 1 段。"
+                    ),
+                    "directive": f"将 [{bname}] 中 '{cname}' 的 SCoil (NW{sorted(s_set)}) 与 RCoil (NW{sorted(r_set)}) 合并进同一复合程序段。",
+                })
+
+        # 收集变量在块内的读写信息
+        for var_name, nw_idx, reason in audit_info.get("var_writes", []):
+            m_writes[var_name].append((bname, nw_idx, reason))
+        for var_name, nw_idx, reason in audit_info.get("var_reads", []):
+            m_reads[var_name].append((bname, nw_idx, reason))
+
+    # 3. 检测同块内 1 写 1 读无自锁的一次性过渡 %M 桥接位
+    for tag_name, meta in sorted(tag_metadata.items()):
+        addr = meta.get("address", "").upper()
+        dtype = meta.get("dataType", "Bool")
+        if not addr.startswith("%M") or dtype != "Bool":
+            continue
+        if tag_name in SIEMENS_SYSTEM_CLOCK_TAGS or tag_name in SAFETY_PERMISSIVE_TAGS:
+            continue
+        comment = meta.get("comment", "")
+        has_transitory_hint = any(h in tag_name or h in comment for h in _TRANSITORY_M_HINT_KEYWORDS)
+        if not has_transitory_hint and any(k in tag_name for k in _SEMANTIC_M_EXEMPT_KEYWORDS):
+            continue
+
+        ws = m_writes.get(tag_name, [])
+        rs = m_reads.get(tag_name, [])
+        if len(ws) == 1 and len(rs) == 1:
+            w_blk, w_nw, w_reason = ws[0]
+            r_blk, r_nw, r_reason = rs[0]
+            if (
+                w_blk == r_blk
+                and w_reason == "Coil"
+                and r_reason == "Contact"
+                and w_nw != r_nw
+            ):
+                findings.append({
+                    "code": "FRAG_TRANSITORY_M",
+                    "block": w_blk,
+                    "network": w_nw,
+                    "target": tag_name,
+                    "message": (
+                        f"[{w_blk}] 反碎片化审计 (FRAG_TRANSITORY_M): 检测到同块一次性冗余过渡 %M 位 '{tag_name}' ({addr}) "
+                        f"[仅在 NW{w_nw} 写 1 次并在 NW{r_nw} 读 1 次]，请内联指令或直接引用 全局定时器.<成员>.Q 消除该过渡位。"
+                    ),
+                    "directive": (
+                        f"消除 [{w_blk}] NW{w_nw}->NW{r_nw} 间的一次性过渡变量 '{tag_name}'："
+                        f"使用 build_timeout_alarm_network / build_step_with_timer_network / build_composite_network 合并并从变量表移除该点。"
+                    ),
+                })
+
+    return findings
+
+
 def validate_project_xmls(
     xml_dir: str,
     extra_tag_dirs: Optional[List[str]] = None,
     eplan_io_path: Optional[str] = None,
     tia_status_json_path: Optional[str] = None,
+    allowed_versions: Optional[Tuple[str, ...]] = None,
+    check_compact: bool = False,
+    strict_compact: bool = False,
 ) -> ValidationResult:
     """
     批量校验整个工程生成的 XML 目录。
     执行全维度静态语法校验、位级内存重叠检测、安全规则 S1~S5、双线圈冲突审计、悬空 I/O 检测、M 变量读写闭环及 OB1 调用完整性审计。
+    check_compact=True 时输出反碎片化告警；strict_compact=True 时升级为阻断错误。
     """
     all_errors: List[str] = []
     all_warnings: List[str] = []
@@ -1374,6 +1692,7 @@ def validate_project_xmls(
             known_tags=check_tags,
             known_db_members=check_dbs,
             tag_metadata=tag_metadata,
+            allowed_versions=allowed_versions,
         )
         all_errors.extend(errs)
         collected_audits.append(audit_info)
@@ -1487,23 +1806,34 @@ def validate_project_xmls(
         all_errors.extend(hw_errs)
         all_warnings.extend(hw_warns)
 
+    # =========================================================================
+    # 工业级审计 6: 反碎片化审计 (Anti-Fragmentation Check)
+    # =========================================================================
+    anti_frag_findings: List[Dict[str, Any]] = []
+    if check_compact or strict_compact:
+        anti_frag_findings = audit_anti_fragmentation(collected_audits, tag_metadata)
+        for item in anti_frag_findings:
+            if strict_compact:
+                all_errors.append(item["message"])
+            else:
+                all_warnings.append(item["message"])
+
     is_ok = len(all_errors) == 0
     res = ValidationResult(is_ok, all_errors, all_warnings)
     res.hw_report_lines = hw_report_lines
+    res.anti_fragmentation_findings = anti_frag_findings
     return res
 
 
 if __name__ == "__main__":
-    import io
-
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+    ensure_utf8_stdout()
     parser = argparse.ArgumentParser(
         description="SimaticML LAD XML 静态语法、安全逻辑与硬件组态对账校验器"
     )
     parser.add_argument(
         "xml_dir",
         nargs="?",
-        default="tools/test_out",
+        default=".",
         help="待校验的 XML 目录路径（如 03_梯形图XML）",
     )
     parser.add_argument(
@@ -1518,14 +1848,38 @@ if __name__ == "__main__":
         default=None,
         help="博途环境快照 JSON 路径（用于硬件组态地址越界比对）",
     )
+    parser.add_argument(
+        "--tia-version",
+        dest="tia_version",
+        default=None,
+        help="可选限定允许的 Engineering 版本（如 V16 或 V16,V17；默认允许 V16–V20）",
+    )
+    parser.add_argument(
+        "--strict-compact",
+        action="store_true",
+        help="开启严格反碎片化门禁：将过渡 %M 位、跨段 S/R、迷你空壳 FC 升级为阻断错误",
+    )
+    parser.add_argument(
+        "--no-compact-warn",
+        action="store_true",
+        help="关闭 CLI 默认输出反碎片化告警提示",
+    )
     args = parser.parse_args()
 
+    allowed_vers = (
+        tuple(v.strip().upper() for v in args.tia_version.split(",") if v.strip())
+        if args.tia_version
+        else None
+    )
     target_dir = resolve_project_path(args.xml_dir) or args.xml_dir
     print(f"=== SimaticML LAD XML 静态与安全校验器 (目标: {target_dir}) ===")
     res = validate_project_xmls(
         target_dir,
         eplan_io_path=args.eplan_io,
         tia_status_json_path=args.tia_status_json,
+        allowed_versions=allowed_vers,
+        check_compact=(not args.no_compact_warn),
+        strict_compact=args.strict_compact,
     )
     ok = res.ok
     errs = res.errors

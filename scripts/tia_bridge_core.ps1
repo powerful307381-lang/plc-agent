@@ -24,228 +24,13 @@
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-function Resolve-OpennessDllPath {
-    # 1. 按版本号降序动态探测 TIA Portal V20 ~ V16 注册表安装路径与 PublicAPI 目录 (兼容 64/32 位视图)
-    $versions = @("20", "19", "18", "17", "16")
-    foreach ($ver in $versions) {
-        $regSubKey = "SOFTWARE\Siemens\Automation\_InstalledSW\TIAP$ver\Global"
-        foreach ($view in @([Microsoft.Win32.RegistryView]::Registry64, [Microsoft.Win32.RegistryView]::Registry32)) {
-            try {
-                $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $view)
-                $subKey = $baseKey.OpenSubKey($regSubKey)
-                if ($subKey) {
-                    $installPath = $subKey.GetValue("Path")
-                    if ($installPath) {
-                        $candidate = Join-Path $installPath "PublicAPI\V$ver\Siemens.Engineering.dll"
-                        if (Test-Path $candidate) { return $candidate }
-                    }
-                }
-            } catch {}
-        }
-    }
-    # 2. 按版本号降序检查默认安装路径与 Junction 映射目录 (V20 ~ V16)
-    foreach ($ver in $versions) {
-        $defaultCandidate = "C:\Program Files\Siemens\Automation\Portal V$ver\PublicAPI\V$ver\Siemens.Engineering.dll"
-        if (Test-Path $defaultCandidate) { return $defaultCandidate }
-    }
-    # 3. 保底返回 V16 标准路径（供后续 Test-Path 报告明确缺失提示）
-    return "C:\Program Files\Siemens\Automation\Portal V16\PublicAPI\V16\Siemens.Engineering.dll"
-}
+Import-Module (Join-Path $PSScriptRoot "tia_common.psm1") -DisableNameChecking -Force
 
-$dllPath = Resolve-OpennessDllPath
-$dllOk = Test-Path $dllPath
+$dllInfo = Resolve-OpennessDllInfo
+$dllPath = $dllInfo.DllPath
+$dllOk = $dllInfo.Found
 if ($dllOk) {
     [System.Reflection.Assembly]::LoadFrom($dllPath) | Out-Null
-}
-
-function Get-PlcSoftwareFromDeviceItem($deviceItem) {
-    $methods = $deviceItem.GetType().GetMethods() | Where-Object { $_.Name -eq "GetService" -and $_.IsGenericMethod }
-    if ($methods) {
-        try {
-            $swCont = $methods[0].MakeGenericMethod(@([Siemens.Engineering.HW.Features.SoftwareContainer])).Invoke($deviceItem, $null)
-            if ($swCont -and $swCont.Software) {
-                return $swCont.Software
-            }
-        } catch {}
-    }
-    foreach ($sub in $deviceItem.DeviceItems) {
-        $res = Get-PlcSoftwareFromDeviceItem $sub
-        if ($res) { return $res }
-    }
-    return $null
-}
-
-function Get-AllProjectDevices($proj) {
-    $list = @()
-    foreach ($d in $proj.Devices) { $list += $d }
-    function Walk-DeviceGroup($grp) {
-        $res = @()
-        foreach ($d in $grp.Devices) { $res += $d }
-        foreach ($sub in $grp.Groups) { $res += Walk-DeviceGroup $sub }
-        return $res
-    }
-    foreach ($g in $proj.DeviceGroups) { $list += Walk-DeviceGroup $g }
-    if ($proj.UngroupedDevicesGroup) {
-        foreach ($d in $proj.UngroupedDevicesGroup.Devices) { $list += $d }
-    }
-    return $list
-}
-
-function Find-BlockRecursive($group, [string]$name) {
-    $b = $group.Blocks.Find($name)
-    if ($b) { return $b }
-    foreach ($sub in $group.Groups) {
-        $res = Find-BlockRecursive $sub $name
-        if ($res) { return $res }
-    }
-    return $null
-}
-
-function Find-TagTableRecursive($group, [string]$name) {
-    $tt = $group.TagTables.Find($name)
-    if ($tt) { return $tt }
-    foreach ($sub in $group.Groups) {
-        $res = Find-TagTableRecursive $sub $name
-        if ($res) { return $res }
-    }
-    return $null
-}
-
-function Get-PlcTargetFromDeviceItem($dev, $deviceItem) {
-    $methods = $deviceItem.GetType().GetMethods() | Where-Object { $_.Name -eq "GetService" -and $_.IsGenericMethod }
-    if ($methods) {
-        try {
-            $swCont = $methods[0].MakeGenericMethod(@([Siemens.Engineering.HW.Features.SoftwareContainer])).Invoke($deviceItem, $null)
-            if ($swCont -and $swCont.Software -and ($null -ne $swCont.Software.PSObject.Properties["BlockGroup"])) {
-                return [PSCustomObject]@{
-                    Device         = $dev
-                    CpuItem        = $deviceItem
-                    DeviceName     = $dev.Name
-                    PlcName        = $deviceItem.Name
-                    TypeIdentifier = "$($deviceItem.TypeIdentifier)"
-                    Software       = $swCont.Software
-                }
-            }
-        } catch {}
-    }
-    foreach ($sub in $deviceItem.DeviceItems) {
-        $res = Get-PlcTargetFromDeviceItem $dev $sub
-        if ($res) { return $res }
-    }
-    return $null
-}
-
-function Select-TiaProcess($procs, [int]$procIdx, [string]$projPath) {
-    if (-not $procs -or $procs.Count -eq 0) {
-        Write-Host (ConvertTo-Json -Depth 4 @{ Success = $false; Error = "未找到运行中的博途进程" })
-        exit 1
-    }
-    $candidates = @()
-    for ($i = 0; $i -lt $procs.Count; $i++) {
-        $p = $procs[$i]
-        $candidates += [PSCustomObject]@{
-            Index       = $i
-            ProcessId   = $p.Id
-            ProjectPath = if ($p.ProjectPath) { $p.ProjectPath.FullName } else { "" }
-        }
-    }
-
-    if ($projPath) {
-        $trimmed = $projPath.Trim().Trim('"')
-        $normReq = $trimmed
-        try { $normReq = [System.IO.Path]::GetFullPath($trimmed) } catch {}
-        $matchedProcs = @()
-        for ($i = 0; $i -lt $procs.Count; $i++) {
-            $pp = if ($procs[$i].ProjectPath) { $procs[$i].ProjectPath.FullName } else { "" }
-            if (-not $pp) { continue }
-            $normPp = $pp
-            try { $normPp = [System.IO.Path]::GetFullPath($pp) } catch {}
-            if ($normPp -ieq $normReq -or $pp -ieq $trimmed -or ([System.IO.Path]::GetFileName($pp) -ieq $trimmed)) {
-                $matchedProcs += $procs[$i]
-            }
-        }
-        if ($matchedProcs.Count -eq 1) { return $matchedProcs[0] }
-        if ($matchedProcs.Count -eq 0) {
-            Write-Host ([PSCustomObject]@{
-                Success    = $false
-                Error      = "未找到打开目标项目 '$projPath' 的博途进程"
-                Candidates = $candidates
-            } | ConvertTo-Json -Depth 4)
-            exit 2
-        }
-        Write-Host ([PSCustomObject]@{
-            Success    = $false
-            Error      = "存在多个匹配 '$projPath' 的博途进程，请改用 -ProcessIndex 显式指定"
-            Candidates = $candidates
-        } | ConvertTo-Json -Depth 4)
-        exit 2
-    }
-
-    if ($procIdx -ge 0) {
-        if ($procIdx -ge $procs.Count) {
-            Write-Host ([PSCustomObject]@{
-                Success    = $false
-                Error      = "指定的 ProcessIndex=$procIdx 越界（共 $($procs.Count) 个博途进程）"
-                Candidates = $candidates
-            } | ConvertTo-Json -Depth 4)
-            exit 2
-        }
-        return $procs[$procIdx]
-    }
-
-    if ($procs.Count -eq 1) { return $procs[0] }
-
-    Write-Host ([PSCustomObject]@{
-        Success    = $false
-        Error      = "检测到 $($procs.Count) 个运行中的博途进程，请显式传入 -ProcessIndex 或 -ProjectPath"
-        Candidates = $candidates
-    } | ConvertTo-Json -Depth 4)
-    exit 2
-}
-
-function Select-PlcSoftware($proj, [string]$plcName) {
-    $allDevs = Get-AllProjectDevices $proj
-    $targets = @()
-    foreach ($dev in $allDevs) {
-        $t = Get-PlcTargetFromDeviceItem $dev $dev
-        if ($t) { $targets += $t }
-    }
-    if ($targets.Count -eq 0) {
-        Write-Host (ConvertTo-Json -Depth 4 @{ Success = $false; Error = "未找到 PLC 软件容器 (SoftwareContainer)" })
-        exit 1
-    }
-    $candidates = @($targets | ForEach-Object {
-        [PSCustomObject]@{
-            DeviceName     = $_.DeviceName
-            PlcName        = $_.PlcName
-            TypeIdentifier = $_.TypeIdentifier
-        }
-    })
-    if ($plcName) {
-        $matched = @($targets | Where-Object { $_.PlcName -ieq $plcName -or $_.DeviceName -ieq $plcName })
-        if ($matched.Count -eq 1) { return $matched[0] }
-        if ($matched.Count -eq 0) {
-            Write-Host ([PSCustomObject]@{
-                Success    = $false
-                Error      = "未找到名为 '$plcName' 的 PLC 设备或 CPU"
-                Candidates = $candidates
-            } | ConvertTo-Json -Depth 4)
-            exit 2
-        }
-        Write-Host ([PSCustomObject]@{
-            Success    = $false
-            Error      = "名为 '$plcName' 的 PLC 匹配到多台设备，请使用唯一的站点/CPU 名称"
-            Candidates = $candidates
-        } | ConvertTo-Json -Depth 4)
-        exit 2
-    }
-    if ($targets.Count -eq 1) { return $targets[0] }
-    Write-Host ([PSCustomObject]@{
-        Success    = $false
-        Error      = "项目中包含 $($targets.Count) 台 PLC，请显式传入 -PlcName 指定目标 PLC"
-        Candidates = $candidates
-    } | ConvertTo-Json -Depth 4)
-    exit 2
 }
 
 # 动作 1: 列出博途进程
@@ -686,59 +471,6 @@ if ($Action -eq "export-all") {
     exit 0
 }
 
-function Get-OpennessService($targetObj, [type]$serviceType) {
-    if (-not $targetObj) { return $null }
-    $methods = $targetObj.GetType().GetMethods() | Where-Object { $_.Name -eq "GetService" -and $_.IsGenericMethod }
-    if ($methods) {
-        try {
-            return $methods[0].MakeGenericMethod(@($serviceType)).Invoke($targetObj, $null)
-        } catch {}
-    }
-    return $null
-}
-
-function Extract-CompileMessagesRecursive($msgNode, [string]$parentPath = "") {
-    $list = @()
-    if (-not $msgNode) { return $list }
-    $curPath = if ($msgNode.Path) { "$($msgNode.Path)" } else { $parentPath }
-    if (-not [string]::IsNullOrWhiteSpace($msgNode.Description)) {
-        $list += [PSCustomObject]@{
-            Severity    = "$($msgNode.Severity)"
-            Description = "$($msgNode.Description)"
-            Path        = $curPath
-            DateTime    = "$($msgNode.DateTime)"
-        }
-    }
-    if ($msgNode.Messages) {
-        foreach ($sub in $msgNode.Messages) {
-            $list += Extract-CompileMessagesRecursive $sub $curPath
-        }
-    }
-    return $list
-}
-
-function ConvertTo-ActionableCompileErrors($messages) {
-    $out = @()
-    foreach ($m in $messages) {
-        if ($m.Severity -ne "Error") { continue }
-        $desc = "$($m.Description)"
-        $hint = "请检查报错路径 '$($m.Path)' 对应的 LAD XML 符号、接口或指令语法，修复后重跑 validate_lad_xml.py 与 -DiffOnly。"
-        if ($desc -match "not defined|未定义|unknown|不存在") {
-            $hint = "检测到未定义符号/块，请检查 TagTable_IO/TagTable_M 变量声明、全局定时器 DB 成员名或被调用 FB/FC 是否已包含在导入目录中。"
-        } elseif ($desc -match "data type|数据类型|mismatch|不匹配") {
-            $hint = "检测到数据类型不匹配，请核对 %I/%Q/%IW 数据类型（Bool vs Int/Time）或形参 Section 类型是否一致。"
-        } elseif ($desc -match "time stamp|时间戳|interface|接口") {
-            $hint = "检测到块接口或时间戳冲突，请先导入 UDT/被调 FB，再重新生成调用方与 InstanceDB。"
-        }
-        $out += [PSCustomObject]@{
-            Path          = $m.Path
-            Description   = $desc
-            FixSuggestion = $hint
-        }
-    }
-    return $out
-}
-
 # 动作 5: CAx (AutomationML .aml) 硬件导入与结构化 TransferResult 抽取
 if ($Action -eq "import-cax") {
     if ([string]::IsNullOrWhiteSpace($AmlPath) -or -not (Test-Path $AmlPath)) {
@@ -878,10 +610,21 @@ if ($Action -eq "import-watch-tables") {
             } elseif ($fNode) {
                 $tNameNode = $fNode.SelectSingleNode("./*[local-name()='AttributeList']/*[local-name()='Name']")
                 $tName = if ($tNameNode) { $tNameNode.InnerText.Trim() } else { [System.IO.Path]::GetFileNameWithoutExtension($xf.Name) }
-                $null = $wfGroup.ForceTables.Import($fi, $importOpt)
-                $ftObj = $wfGroup.ForceTables.Find($tName)
-                if ($ftObj -and $ShowInEditor) { try { $ftObj.ShowInEditor() } catch {} }
-                $forceLogs += [PSCustomObject]@{ Name = $tName; File = $xf.Name; Status = "OK" }
+                $existingFt = $null
+                try { $existingFt = $wfGroup.ForceTables.Find($tName) } catch {}
+                if ($existingFt) {
+                    $null = $wfGroup.ForceTables.Import($fi, $importOpt)
+                    $ftObj = $wfGroup.ForceTables.Find($tName)
+                    if ($ftObj -and $ShowInEditor) { try { $ftObj.ShowInEditor() } catch {} }
+                    $forceLogs += [PSCustomObject]@{ Name = $tName; File = $xf.Name; Status = "OK" }
+                } else {
+                    $forceLogs += [PSCustomObject]@{
+                        Name   = $tName
+                        File   = $xf.Name
+                        Status = "SKIPPED"
+                        Reason = "TIA Openness ForceTables 为只读单例集合，不支持新建命名强制表（冷态强制表 XML 已留档供手动导入参考）"
+                    }
+                }
             }
         } catch {
             $watchLogs += [PSCustomObject]@{ File = $xf.Name; Status = "FAIL"; Error = $_.Exception.Message }
@@ -947,18 +690,7 @@ function Test-IsFailSafePlc($plcTarget) {
     return $false
 }
 
-function Get-CompareOnlineToken([string]$projName, [string]$plcName, [string]$cpuModel, [string]$compareState) {
-    $raw = "ONLINE_GATE|$projName|$plcName|$cpuModel|$compareState"
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        $bytes = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($raw))
-        return ([System.BitConverter]::ToString($bytes) -replace "-", "").ToLowerInvariant().Substring(0, 16)
-    } finally {
-        $sha.Dispose()
-    }
-}
-
-# 动作 8: 在线/离线程序比对与下载确认令牌签发
+# 动作 8: 在线/离线程序比对与一次性下载确认令牌签发
 if ($Action -eq "compare-online") {
     $procs = [Siemens.Engineering.TiaPortal]::GetProcesses()
     $targetProc = Select-TiaProcess $procs $ProcessIndex $ProjectPath
@@ -976,6 +708,7 @@ if ($Action -eq "compare-online") {
     $cmpState = "Unknown"
     $diffItems = @()
     $compareError = ""
+    $compareOk = $false
     try {
         $cmpRes = $sw.CompareToOnline()
         if ($cmpRes -and $cmpRes.RootElement) {
@@ -989,16 +722,35 @@ if ($Action -eq "compare-online") {
         } else {
             $cmpState = "Compared"
         }
+        $compareOk = $true
     } catch {
         $cmpState = "OfflineOrUnreachable"
         $compareError = $_.Exception.Message
+        $compareOk = $false
     }
 
-    $token = Get-CompareOnlineToken $proj.Name $plcTarget.PlcName $cpuModel $cmpState
+    if (-not $compareOk) {
+        [PSCustomObject]@{
+            Success                     = $false
+            ProjectName                 = $proj.Name
+            PlcName                     = $plcTarget.PlcName
+            CpuModel                    = $cpuModel
+            IsFailSafePlc               = $isFailSafe
+            FirstManualDownloadRequired = $isFailSafe
+            CompareState                = $cmpState
+            DiffSummary                 = $diffItems
+            CompareError                = $compareError
+            ConfirmOnlineToken          = ""
+            ActionableHint              = "在线比对失败（PLC 离线或不可达），已禁止签发下载令牌！请检查网线、PG/PC 接口、PLC IP 或仿真器运行状态后重试。"
+        } | ConvertTo-Json -Depth 5
+        exit 1
+    }
+
+    $token = New-CompareOnlineGateTicket -ProjectName $proj.Name -PlcName $plcTarget.PlcName -CpuModel $cpuModel -CompareState $cmpState -IsFailSafePlc $isFailSafe -TtlMinutes 15
     $hint = if ($isFailSafe) {
-        "检测到故障安全 F-PLC：首次包含安全程序的完整下载必须在博途 GUI 手动执行；仅常规程序修改可通过 ConfirmOnlineToken 与 HumanApproved 授权下装。"
+        "检测到故障安全 F-PLC：首次包含安全程序的完整下载必须在博途 GUI 手动执行；仅常规程序修改可通过本一次性 ConfirmOnlineToken（15 分钟有效）与 -HumanApproved 授权下装。"
     } else {
-        "请向现场工程师展示比对摘要与安全检查表，获取显式人工授权后携带 ConfirmOnlineToken 与 -HumanApproved 执行受控下载。"
+        "请向现场工程师展示比对摘要与安全检查表，获取显式人工授权后携带本一次性 ConfirmOnlineToken（15 分钟有效）与 -HumanApproved 执行受控下载。"
     }
 
     [PSCustomObject]@{
@@ -1012,12 +764,13 @@ if ($Action -eq "compare-online") {
         DiffSummary                 = $diffItems
         CompareError                = $compareError
         ConfirmOnlineToken          = $token
+        TokenExpiresMinutes         = 15
         ActionableHint              = $hint
     } | ConvertTo-Json -Depth 5
     exit 0
 }
 
-# 动作 9: 受控向 PLC 下载程序 (三重安全门禁硬拦截)
+# 动作 9: 受控向 PLC 下载程序 (三重安全门禁 + 一次性票据严格验签硬拦截)
 if ($Action -eq "download-plc") {
     if (-not $HumanApproved) {
         Write-Host ([PSCustomObject]@{
@@ -1028,12 +781,12 @@ if ($Action -eq "download-plc") {
         } | ConvertTo-Json -Depth 4)
         exit 1
     }
-    if ([string]::IsNullOrWhiteSpace($ConfirmOnlineToken) -or $ConfirmOnlineToken.Trim().Length -lt 8) {
+    if ([string]::IsNullOrWhiteSpace($ConfirmOnlineToken) -or ($ConfirmOnlineToken.Trim() -notmatch "^[0-9a-fA-F]{16}$")) {
         Write-Host ([PSCustomObject]@{
             Success        = $false
             GateBlocked    = $true
             GateReason     = "MISSING_COMPARE_ONLINE_TOKEN"
-            ActionableHint = "高危操作拦截：必须先执行 -Action compare-online 获取有效 ConfirmOnlineToken 并在人工比对后传入。"
+            ActionableHint = "高危操作拦截：必须先执行 -Action compare-online 获取有效的 16 位 ConfirmOnlineToken 并在人工比对后传入。"
         } | ConvertTo-Json -Depth 4)
         exit 1
     }
@@ -1047,6 +800,18 @@ if ($Action -eq "download-plc") {
     }
     $proj = $tia.Projects[0]
     $plcTarget = Select-PlcSoftware $proj $PlcName
+
+    $ticketCheck = Test-CompareOnlineGateTicket -Token $ConfirmOnlineToken -ProjectName $proj.Name -PlcName $plcTarget.PlcName
+    if (-not $ticketCheck.Valid) {
+        Write-Host ([PSCustomObject]@{
+            Success        = $false
+            GateBlocked    = $true
+            GateReason     = $ticketCheck.Reason
+            ActionableHint = $ticketCheck.Message
+        } | ConvertTo-Json -Depth 4)
+        exit 1
+    }
+
     $isFailSafe = Test-IsFailSafePlc $plcTarget
     if ($isFailSafe -and (-not $FirstManualDownloadDone)) {
         Write-Host ([PSCustomObject]@{
@@ -1080,6 +845,9 @@ if ($Action -eq "download-plc") {
             }
         }
     } catch {}
+
+    # 消费一次性下载令牌防止重放
+    $null = Test-CompareOnlineGateTicket -Token $ConfirmOnlineToken -ProjectName $proj.Name -PlcName $plcTarget.PlcName -Consume
 
     $dlState = "Unknown"
     $dlErrCount = 0

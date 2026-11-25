@@ -37,12 +37,14 @@ for p in [current_dir, parent_dir, root_dir, os.path.join(root_dir, "tools")]:
         sys.path.insert(0, p)
 
 try:
+    from common_utils import ensure_utf8_stdout, infer_plc_family_label
     from delivery_builder import create_delivery_tables
 except ImportError:
+    from scripts.common_utils import ensure_utf8_stdout, infer_plc_family_label  # type: ignore
     try:
         from tools.delivery_builder import create_delivery_tables
     except ImportError:
-        create_delivery_tables = None
+        from scripts.delivery_builder import create_delivery_tables  # type: ignore
 
 
 COMMENT_REGEX = re.compile(
@@ -437,7 +439,8 @@ def reverse_generate(
         if tia_project_name:
             project_info["project_name"] = tia_project_name
         if tia_cpu_model:
-            project_info["plc_model"] = f"西门子 SIMATIC S7-1200 ({tia_cpu_model})"
+            fam = infer_plc_family_label(tia_cpu_model)
+            project_info["plc_model"] = f"西门子 {fam} ({tia_cpu_model})"
 
         out_xlsx = os.path.join(output_dir, "05_现场调试交付三表.xlsx")
         out_md = os.path.join(output_dir, "05_现场调试交付三表.md")
@@ -463,11 +466,9 @@ def reverse_generate(
 
 
 if __name__ == "__main__":
-    import io
-
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+    ensure_utf8_stdout()
     parser = argparse.ArgumentParser(description="从博途 XML 目录或运行中博途反向一键生成交付三表")
-    parser.add_argument("xml_dir", nargs="?", default="项目/演示项目_20261028/03_梯形图XML", help="待扫描的 XML 或项目目录")
+    parser.add_argument("xml_dir", nargs="?", default="03_梯形图XML", help="待扫描的 XML 或项目目录")
     parser.add_argument("-o", "--out-dir", dest="out_dir", default=None, help="交付物输出目录 (默认输出到 xml_dir/05_反向生成交付)")
     parser.add_argument("--from-tia", action="store_true", help="直接从当前博途进程导出并生成")
     parser.add_argument("--process-index", type=int, default=-1, help="博途进程序号（-1 为单进程自动选择）")

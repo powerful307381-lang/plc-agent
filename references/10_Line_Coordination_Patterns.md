@@ -1,6 +1,6 @@
 # 10 产线级控制协调模式与五大控制关系梯形图范式
 
-> **定位**：基于工业控制基准研究 *PLCWorld*（arXiv:2610.02982）实证总结的五大制造设备控制依赖关系族，固化为西门子博途纯梯形图（LAD）标准实现范式与 `templates/` 对应结构，消除“只生成孤立 I/O、无法跑通整线步序与安全联锁”的架构断层。
+> **定位**：将制造产线工程中实证总结的五大设备控制依赖关系族，固化为西门子博途纯梯形图（LAD）标准实现范式与 `templates/` 对应结构，消除“只生成孤立 I/O、无法跑通整线步序与安全联锁”的架构断层。
 
 ## 目录 (Table of Contents)
 - [1. PLCWorld 五大产线控制关系族与 LAD 映射总览](#1-plcworld-五大产线控制关系族与-lad-映射总览)
@@ -64,8 +64,8 @@
 
 1. **Step 1 上游发起请求**：上游工位加工完毕且下游 `RdyFromNext = 1` ➔ 置位 `ReqToNext = 1`；
 2. **Step 2 交接传输中**：上游与下游同时处于安全允许状态 ➔ 置位 `TransferActive = 1` 驱动传输机构将工件送入下游；
-3. **Step 3 下游到位确认**：下游进料传感器触发且传递 `WorkpieceID` / `QualityCode` ➔ 下游置位 `TransferDone = 1` 并拉低 `RdyFromNext = 0`；
-4. **Step 4 握手复位**：上游收到 `TransferDone = 1` 后复位 `ReqToNext = 0` 与 `TransferActive = 0`，上游安全退回原位后允许下游开始加工。
+3. **Step 3 下游到位确认**：下游进料传感器触发且传递 `WorkpieceID` / `QualityCode` ➔ 下游置位自锁 `TransferDone = 1`（串联 `RdyFromNext` 保持）；待下游拉低 `RdyFromNext = 0` 后，`TransferDone` 自动释放以便进入下一工件循环；
+4. **Step 4 握手复位**：上游收到 `TransferDone = 1` 后拉低 `ReqToNext = 0` 与 `TransferActive = 0`，上游安全退回原位后允许下游开始加工。
 
 > 若任意工位触发 `FaultStop = 1` 或 `M_安全条件满足 = 0`，双方立即切断 `TransferActive` 并挂起交接，防止送料顶撞。
 

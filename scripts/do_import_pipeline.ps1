@@ -18,150 +18,16 @@ if ([string]::IsNullOrWhiteSpace($ImportDir) -or -not (Test-Path $ImportDir)) {
     exit 1
 }
 
-function Resolve-OpennessDllPath {
-    # 按版本号降序动态探测 TIA Portal V20 ~ V16 注册表与 PublicAPI 目录 (兼容 64/32 位视图)
-    $versions = @("20", "19", "18", "17", "16")
-    foreach ($ver in $versions) {
-        $regSubKey = "SOFTWARE\Siemens\Automation\_InstalledSW\TIAP$ver\Global"
-        foreach ($view in @([Microsoft.Win32.RegistryView]::Registry64, [Microsoft.Win32.RegistryView]::Registry32)) {
-            try {
-                $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $view)
-                $subKey = $baseKey.OpenSubKey($regSubKey)
-                if ($subKey) {
-                    $installPath = $subKey.GetValue("Path")
-                    if ($installPath) {
-                        $candidate = Join-Path $installPath "PublicAPI\V$ver\Siemens.Engineering.dll"
-                        if (Test-Path $candidate) { return $candidate }
-                    }
-                }
-            } catch {}
-        }
-    }
-    foreach ($ver in $versions) {
-        $defaultCandidate = "C:\Program Files\Siemens\Automation\Portal V$ver\PublicAPI\V$ver\Siemens.Engineering.dll"
-        if (Test-Path $defaultCandidate) { return $defaultCandidate }
-    }
-    return "C:\Program Files\Siemens\Automation\Portal V16\PublicAPI\V16\Siemens.Engineering.dll"
-}
+Import-Module (Join-Path $PSScriptRoot "tia_common.psm1") -DisableNameChecking -Force
 
-$dllPath = Resolve-OpennessDllPath
+$dllInfo = Resolve-OpennessDllInfo
+$dllPath = $dllInfo.DllPath
+$tiaVer = if ($dllInfo.Version) { $dllInfo.Version } else { "16" }
 if (-not (Test-Path $dllPath)) {
     Write-Host ([PSCustomObject]@{ Success = $false; Stage = "Init"; Error = "未找到 Siemens.Engineering.dll: '$dllPath'" } | ConvertTo-Json -Depth 4)
     exit 1
 }
 [System.Reflection.Assembly]::LoadFrom($dllPath) | Out-Null
-
-# 递归枚举所有设备与 PLC 目标
-function Get-AllProjectDevices($project) {
-    $list = @()
-    foreach ($d in $project.Devices) { $list += $d }
-    function Walk-DeviceGroup($grp) {
-        $res = @()
-        foreach ($d in $grp.Devices) { $res += $d }
-        foreach ($sub in $grp.Groups) { $res += Walk-DeviceGroup $sub }
-        return $res
-    }
-    foreach ($g in $project.DeviceGroups) { $list += Walk-DeviceGroup $g }
-    if ($project.UngroupedDevicesGroup) {
-        foreach ($d in $project.UngroupedDevicesGroup.Devices) { $list += $d }
-    }
-    return $list
-}
-
-function Get-PlcTargetFromDeviceItem($dev, $deviceItem) {
-    $methods = $deviceItem.GetType().GetMethods() | Where-Object { $_.Name -eq "GetService" -and $_.IsGenericMethod }
-    if ($methods) {
-        try {
-            $swCont = $methods[0].MakeGenericMethod(@([Siemens.Engineering.HW.Features.SoftwareContainer])).Invoke($deviceItem, $null)
-            if ($swCont -and $swCont.Software -and ($null -ne $swCont.Software.PSObject.Properties["BlockGroup"])) {
-                return [PSCustomObject]@{
-                    Device         = $dev
-                    CpuItem        = $deviceItem
-                    DeviceName     = $dev.Name
-                    PlcName        = $deviceItem.Name
-                    TypeIdentifier = "$($deviceItem.TypeIdentifier)"
-                    Software       = $swCont.Software
-                }
-            }
-        } catch {}
-    }
-    foreach ($sub in $deviceItem.DeviceItems) {
-        $res = Get-PlcTargetFromDeviceItem $dev $sub
-        if ($res) { return $res }
-    }
-    return $null
-}
-
-function Select-TiaProcess($procs, [int]$procIdx, [string]$projPath) {
-    if (-not $procs -or $procs.Count -eq 0) {
-        Write-Host ([PSCustomObject]@{ Success = $false; Error = "未找到运行中的博途进程" } | ConvertTo-Json -Depth 4)
-        exit 1
-    }
-    $candidates = @()
-    for ($i = 0; $i -lt $procs.Count; $i++) {
-        $p = $procs[$i]
-        $candidates += [PSCustomObject]@{
-            Index       = $i
-            ProcessId   = $p.Id
-            ProjectPath = if ($p.ProjectPath) { $p.ProjectPath.FullName } else { "" }
-        }
-    }
-    if ($projPath) {
-        $trimmed = $projPath.Trim().Trim('"')
-        $normReq = $trimmed
-        try { $normReq = [System.IO.Path]::GetFullPath($trimmed) } catch {}
-        $matchedProcs = @()
-        for ($i = 0; $i -lt $procs.Count; $i++) {
-            $pp = if ($procs[$i].ProjectPath) { $procs[$i].ProjectPath.FullName } else { "" }
-            if (-not $pp) { continue }
-            $normPp = $pp
-            try { $normPp = [System.IO.Path]::GetFullPath($pp) } catch {}
-            if ($normPp -ieq $normReq -or $pp -ieq $trimmed -or ([System.IO.Path]::GetFileName($pp) -ieq $trimmed)) {
-                $matchedProcs += $procs[$i]
-            }
-        }
-        if ($matchedProcs.Count -eq 1) { return $matchedProcs[0] }
-        $errMsg = if ($matchedProcs.Count -eq 0) { "未找到打开目标项目 '$projPath' 的博途进程" } else { "存在多个匹配 '$projPath' 的博途进程，请改用 -ProcessIndex 显式指定" }
-        Write-Host ([PSCustomObject]@{ Success = $false; Error = $errMsg; Candidates = $candidates } | ConvertTo-Json -Depth 4)
-        exit 2
-    }
-    if ($procIdx -ge 0) {
-        if ($procIdx -ge $procs.Count) {
-            Write-Host ([PSCustomObject]@{ Success = $false; Error = "指定的 ProcessIndex=$procIdx 越界（共 $($procs.Count) 个博途进程）"; Candidates = $candidates } | ConvertTo-Json -Depth 4)
-            exit 2
-        }
-        return $procs[$procIdx]
-    }
-    if ($procs.Count -eq 1) { return $procs[0] }
-    Write-Host ([PSCustomObject]@{ Success = $false; Error = "检测到 $($procs.Count) 个运行中的博途进程，请显式传入 -ProcessIndex 或 -ProjectPath"; Candidates = $candidates } | ConvertTo-Json -Depth 4)
-    exit 2
-}
-
-function Select-PlcSoftware($proj, [string]$plcName) {
-    $allDevs = Get-AllProjectDevices $proj
-    $targets = @()
-    foreach ($dev in $allDevs) {
-        $t = Get-PlcTargetFromDeviceItem $dev $dev
-        if ($t) { $targets += $t }
-    }
-    if ($targets.Count -eq 0) {
-        Write-Host ([PSCustomObject]@{ Success = $false; Error = "未找到 PLC 软件容器 (SoftwareContainer)" } | ConvertTo-Json -Depth 4)
-        exit 1
-    }
-    $candidates = @($targets | ForEach-Object {
-        [PSCustomObject]@{ DeviceName = $_.DeviceName; PlcName = $_.PlcName; TypeIdentifier = $_.TypeIdentifier }
-    })
-    if ($plcName) {
-        $matched = @($targets | Where-Object { $_.PlcName -ieq $plcName -or $_.DeviceName -ieq $plcName })
-        if ($matched.Count -eq 1) { return $matched[0] }
-        $errMsg = if ($matched.Count -eq 0) { "未找到名为 '$plcName' 的 PLC 设备或 CPU" } else { "名为 '$plcName' 的 PLC 匹配到多台设备，请使用唯一名称" }
-        Write-Host ([PSCustomObject]@{ Success = $false; Error = $errMsg; Candidates = $candidates } | ConvertTo-Json -Depth 4)
-        exit 2
-    }
-    if ($targets.Count -eq 1) { return $targets[0] }
-    Write-Host ([PSCustomObject]@{ Success = $false; Error = "项目中包含 $($targets.Count) 台 PLC，请显式传入 -PlcName 指定目标 PLC"; Candidates = $candidates } | ConvertTo-Json -Depth 4)
-    exit 2
-}
 
 # 断开指定设备的在线监视 (GoOffline)
 function Disconnect-Online($deviceItem) {
@@ -214,39 +80,6 @@ $proj = $tia.Projects[0]
 $plcTarget = Select-PlcSoftware $proj $PlcName
 $targetDevice = $plcTarget.Device
 $sw = $plcTarget.Software
-
-function Find-BlockRecursive($group, [string]$name) {
-    if (-not $group) { return $null }
-    $b = $group.Blocks.Find($name)
-    if ($b) { return $b }
-    foreach ($sub in $group.Groups) {
-        $res = Find-BlockRecursive $sub $name
-        if ($res) { return $res }
-    }
-    return $null
-}
-
-function Find-TagTableRecursive($group, [string]$name) {
-    if (-not $group) { return $null }
-    $tt = $group.TagTables.Find($name)
-    if ($tt) { return $tt }
-    foreach ($sub in $group.Groups) {
-        $res = Find-TagTableRecursive $sub $name
-        if ($res) { return $res }
-    }
-    return $null
-}
-
-function Find-UdtRecursive($group, [string]$name) {
-    if (-not $group) { return $null }
-    $tp = $group.Types.Find($name)
-    if ($tp) { return $tp }
-    foreach ($sub in $group.Groups) {
-        $res = Find-UdtRecursive $sub $name
-        if ($res) { return $res }
-    }
-    return $null
-}
 
 function Get-XmlArtifactInfo($xmlPath) {
     $fallbackName = [System.IO.Path]::GetFileNameWithoutExtension($xmlPath)
@@ -309,16 +142,6 @@ function Compare-XmlFingerprint($oldXmlPath, $newXmlPath) {
         return [PSCustomObject]@{ Ok = $false; Diffs = @(); Error = $_.Exception.Message }
     } finally {
         $env:PYTHONIOENCODING = $prevEncoding
-    }
-}
-
-function Get-Sha256HexFromBytes([byte[]]$bytes) {
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        $hashBytes = $sha.ComputeHash($bytes)
-        return ([System.BitConverter]::ToString($hashBytes) -replace "-", "").ToLowerInvariant()
-    } finally {
-        $sha.Dispose()
     }
 }
 
@@ -473,15 +296,15 @@ if ($DiffOnly) {
     exit 0
 }
 
-# 4. Gate 3 强制确认门禁（未持有匹配的 -ConfirmToken 禁止执行任何工程备份或写操作）
+# 4. Gate 3 强制确认门禁（未持有匹配的 -ConfirmToken 禁止执行任何工程备份或写操作，严禁在报错中泄露预期令牌）
 if ([string]::IsNullOrWhiteSpace($ConfirmToken) -or ($ConfirmToken.Trim().ToLowerInvariant() -ne $currentToken)) {
     Write-Host ([PSCustomObject]@{
         Success        = $false
         Stage          = "Gate3"
         ProjectName    = $proj.Name
         PlcName        = $plcTarget.PlcName
-        ExpectedToken  = $currentToken
-        ProvidedToken  = $ConfirmToken
+        TokenMismatch  = $true
+        ProvidedToken  = if ([string]::IsNullOrWhiteSpace($ConfirmToken)) { "" } else { "***REDACTED***" }
         PreImportDiffs = $diffSummaries
         Error          = "未通过 Gate 3：必须先运行 -DiffOnly 预检并经用户明确确认变更清单后，将返回的 ConfirmToken 原样传入 -ConfirmToken 参数。严禁跳过。"
     } | ConvertTo-Json -Depth 6)
@@ -494,7 +317,7 @@ if ([string]::IsNullOrWhiteSpace($BackupDir)) {
     Write-Host ([PSCustomObject]@{
         Success = $false
         Stage   = "Backup"
-        Error   = "必须提供 -BackupDir 参数执行导入前工程归档(.zap16)，未备份禁止修改博途工程"
+        Error   = "必须提供 -BackupDir 参数执行导入前工程归档(.zap$tiaVer)，未备份禁止修改博途工程"
     } | ConvertTo-Json -Depth 4)
     exit 1
 }
@@ -504,7 +327,7 @@ try {
         New-Item -ItemType Directory -Path $BackupDir -Force | Out-Null
     }
     $ts = Get-Date -Format "yyyyMMdd_HHmmss"
-    $zapName = "$($proj.Name)_backup_$ts.zap16"
+    $zapName = "$($proj.Name)_backup_$ts.zap$tiaVer"
     $expectedArchivePath = Join-Path $BackupDir $zapName
     $proj.Save()
     $dirInfo = New-Object System.IO.DirectoryInfo($BackupDir)
@@ -525,31 +348,11 @@ try {
 $blockRollbackDir = Join-Path $BackupDir "block_rollback_$ts"
 New-Item -ItemType Directory -Path $blockRollbackDir -Force | Out-Null
 $blockRollbackList = @()
+$newlyCreatedList = @()
 $blockRollbackExecuted = $false
 $restoredBlocks = @()
+$deletedNewBlocks = @()
 $actionableCompileErrors = @()
-
-function ConvertTo-ActionableCompileErrors($messages) {
-    $out = @()
-    foreach ($m in $messages) {
-        if ($m.Severity -ne "Error") { continue }
-        $desc = "$($m.Description)"
-        $hint = "请检查报错路径 '$($m.Path)' 对应的 LAD XML 逻辑、引脚或符号引用，修复后重跑 validate_lad_xml.py 与 -DiffOnly。"
-        if ($desc -match "not defined|未定义|unknown|不存在") {
-            $hint = "未定义符号或块：检查 TagTable 变量表、全局定时器 DB 成员或被调 FB/FC 是否在导入目录中。"
-        } elseif ($desc -match "data type|数据类型|mismatch|不匹配") {
-            $hint = "数据类型不匹配：检查 Bool/Int/Time 操作数或块接口形参定义。"
-        } elseif ($desc -match "time stamp|时间戳|interface|接口") {
-            $hint = "接口或时间戳冲突：先确认 UDT 与被调 FB，再重新生成调用块与 InstanceDB。"
-        }
-        $out += [PSCustomObject]@{
-            Path          = $m.Path
-            Description   = $desc
-            FixSuggestion = $hint
-        }
-    }
-    return $out
-}
 
 # 6. 仅断开目标 PLC 设备的在线监视 (GoOffline)
 Disconnect-Online $targetDevice
@@ -563,32 +366,13 @@ $errCount = 0
 $warnCount = 0
 $overrideOpt = [Siemens.Engineering.ImportOptions]::Override
 
-function Extract-CompileMessages($msgNode, $parentPath = "") {
-    $list = @()
-    $curPath = if ($msgNode.Path) { "$($msgNode.Path)" } else { $parentPath }
-    if (-not [string]::IsNullOrWhiteSpace($msgNode.Description)) {
-        $list += [PSCustomObject]@{
-            Severity    = "$($msgNode.Severity)"
-            Description = "$($msgNode.Description)"
-            Path        = $curPath
-            DateTime    = "$($msgNode.DateTime)"
-        }
-    }
-    if ($msgNode.Messages) {
-        foreach ($sub in $msgNode.Messages) {
-            $list += Extract-CompileMessages $sub $curPath
-        }
-    }
-    return $list
-}
-
 function Invoke-PlcCompile($targetSw) {
     $compMethods = $targetSw.GetType().GetMethods() | Where-Object { $_.Name -eq "GetService" -and $_.IsGenericMethod }
     $compService = $compMethods[0].MakeGenericMethod(@([Siemens.Engineering.Compiler.ICompilable])).Invoke($targetSw, $null)
     $compRes = $compService.Compile()
     $msgs = @()
     foreach ($m in $compRes.Messages) {
-        $msgs += Extract-CompileMessages $m
+        $msgs += Extract-CompileMessagesRecursive $m
     }
     return [PSCustomObject]@{
         State        = "$($compRes.State)"
@@ -696,7 +480,8 @@ try {
                         $existingObj = Find-BlockRecursive $rootBlockGroup $it.Name
                     }
                     if ($existingObj) {
-                        $rbFile = Join-Path $blockRollbackDir "$($it.Kind)_$($it.Name).xml"
+                        $safeRbName = Sanitize-SafeFileName "$($it.Kind)_$($it.Name)"
+                        $rbFile = Join-Path $blockRollbackDir "$safeRbName.xml"
                         try {
                             $existingObj.Export((New-Object System.IO.FileInfo $rbFile), [Siemens.Engineering.ExportOptions]::WithDefaults)
                             if (Test-Path $rbFile) {
@@ -713,6 +498,13 @@ try {
                     $exclusiveAccess.Text = "正在导入${stageLabel}: $($xf.Name)"
                     $fi = New-Object System.IO.FileInfo($xf.FullName)
                     $null = $targetCollection.Import($fi, $overrideOpt)
+                    if (-not $existingObj) {
+                        $script:newlyCreatedList += [PSCustomObject]@{
+                            Kind       = $it.Kind
+                            Name       = $it.Name
+                            Collection = $targetCollection
+                        }
+                    }
                     [void]$stageLogs.Add([PSCustomObject]@{ File = $xf.Name; Status = "OK"; Type = $it.Kind })
                 } catch {
                     if ($pass -lt $maxPass) {
@@ -763,20 +555,45 @@ try {
     $importLogs += @(Import-StageGroup ($classifiedXmls | Where-Object { $_.Kind -eq "FC" })         "函数(FC)"            $rootBlockGroup.Blocks $true $true)
     $importLogs += @(Import-StageGroup ($classifiedXmls | Where-Object { $_.Kind -eq "OB" })         "组织块(OB)"          $rootBlockGroup.Blocks $true $false)
 
+    function Invoke-BlockAndNewObjectRollback {
+        if ($blockRollbackList.Count -gt 0 -or $newlyCreatedList.Count -gt 0) {
+            $script:blockRollbackExecuted = $true
+        }
+        for ($ri = $blockRollbackList.Count - 1; $ri -ge 0; $ri--) {
+            $rb = $blockRollbackList[$ri]
+            try {
+                $null = $rb.Collection.Import((New-Object System.IO.FileInfo $rb.BackupFile), $overrideOpt)
+                $script:restoredBlocks += "$($rb.Kind):$($rb.Name)"
+            } catch {}
+        }
+        for ($ni = $newlyCreatedList.Count - 1; $ni -ge 0; $ni--) {
+            $nc = $newlyCreatedList[$ni]
+            try {
+                $createdObj = $null
+                if ($nc.Kind -eq "UDT") {
+                    $createdObj = Find-UdtRecursive $typeGroup $nc.Name
+                } elseif ($nc.Kind -eq "TagTable") {
+                    $createdObj = Find-TagTableRecursive $tagTableGroup $nc.Name
+                } elseif ($nc.Kind -eq "WatchTable" -and $sw.WatchAndForceTableGroup) {
+                    $createdObj = $sw.WatchAndForceTableGroup.WatchTables.Find($nc.Name)
+                } elseif ($nc.Kind -eq "ForceTable" -and $sw.WatchAndForceTableGroup) {
+                    $createdObj = $sw.WatchAndForceTableGroup.ForceTables.Find($nc.Name)
+                } else {
+                    $createdObj = Find-BlockRecursive $rootBlockGroup $nc.Name
+                }
+                if ($createdObj) {
+                    $createdObj.Delete()
+                    $script:deletedNewBlocks += "$($nc.Kind):$($nc.Name)"
+                }
+            } catch {}
+        }
+    }
+
     $hasImportFail = @($importLogs | Where-Object { $_.Status -eq "FAIL" }).Count -gt 0
     if ($hasImportFail) {
         $compileState = "AbortedOnImportFail"
-        # 未提交事务且在退出前按倒序执行块级显式回滚保护
-        if ($blockRollbackList.Count -gt 0) {
-            $blockRollbackExecuted = $true
-            for ($ri = $blockRollbackList.Count - 1; $ri -ge 0; $ri--) {
-                $rb = $blockRollbackList[$ri]
-                try {
-                    $null = $rb.Collection.Import((New-Object System.IO.FileInfo $rb.BackupFile), $overrideOpt)
-                    $restoredBlocks += "$($rb.Kind):$($rb.Name)"
-                } catch {}
-            }
-        }
+        # 未提交事务且在退出前按倒序执行块级显式回滚保护与新建对象清理
+        Invoke-BlockAndNewObjectRollback
     } else {
         $runOutsideTx = [bool]$CompileOutsideTransaction
         $compRes = $null
@@ -823,16 +640,7 @@ try {
                 }
             } else {
                 $actionableCompileErrors = @(ConvertTo-ActionableCompileErrors $compileLogs)
-                if ($blockRollbackList.Count -gt 0) {
-                    $blockRollbackExecuted = $true
-                    for ($ri = $blockRollbackList.Count - 1; $ri -ge 0; $ri--) {
-                        $rb = $blockRollbackList[$ri]
-                        try {
-                            $null = $rb.Collection.Import((New-Object System.IO.FileInfo $rb.BackupFile), $overrideOpt)
-                            $restoredBlocks += "$($rb.Kind):$($rb.Name)"
-                        } catch {}
-                    }
-                }
+                Invoke-BlockAndNewObjectRollback
             }
         } else {
             # 先提交并释放 Transaction，保持 ExclusiveAccess 再执行编译
@@ -854,25 +662,18 @@ try {
                 $compileFailedAfterCommit = $true
                 $rollbackRequired = $true
                 $actionableCompileErrors = @(ConvertTo-ActionableCompileErrors $compileLogs)
-                if ($blockRollbackList.Count -gt 0) {
+                if ($blockRollbackList.Count -gt 0 -or $newlyCreatedList.Count -gt 0) {
                     $rbTx = $null
                     try {
                         $rbTx = $exclusiveAccess.Transaction($proj, "编译失败回滚原块")
-                        $blockRollbackExecuted = $true
-                        for ($ri = $blockRollbackList.Count - 1; $ri -ge 0; $ri--) {
-                            $rb = $blockRollbackList[$ri]
-                            try {
-                                $null = $rb.Collection.Import((New-Object System.IO.FileInfo $rb.BackupFile), $overrideOpt)
-                                $restoredBlocks += "$($rb.Kind):$($rb.Name)"
-                            } catch {}
-                        }
+                        Invoke-BlockAndNewObjectRollback
                         $rbTx.CommitOnDispose()
                     } catch {
                     } finally {
                         if ($rbTx) { $rbTx.Dispose() }
                     }
                 }
-                $recoveryHint = "事务外编译存在 $errCount 个错误（已自动回滚 $($restoredBlocks.Count) 个原块）；系统未执行 Project.Save()。也可使用归档备份恢复工程: $archivePath"
+                $recoveryHint = "事务外编译存在 $errCount 个错误（已自动回滚 $($restoredBlocks.Count) 个原块并清理 $($deletedNewBlocks.Count) 个新增块）；系统未执行 Project.Save()。也可使用归档备份恢复工程: $archivePath"
             }
         }
     }
@@ -915,6 +716,7 @@ $finalOutput = [PSCustomObject]@{
     RollbackRequired        = $rollbackRequired
     BlockRollbackExecuted   = $blockRollbackExecuted
     RestoredBlocks          = $restoredBlocks
+    DeletedNewBlocks        = $deletedNewBlocks
     RecoveryHint            = $recoveryHint
     ArchiveBackupPath       = $archivePath
     CompileMode             = $compileMode

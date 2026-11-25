@@ -40,9 +40,7 @@ try:
         parse_process_spec,
     )
     from validate_lad_xml import (
-        build_power_graph,
-        collect_defined_symbols,
-        series_contacts_of_coil,
+        collect_project_coil_series,
         validate_project_xmls,
     )
 except ImportError:
@@ -52,9 +50,7 @@ except ImportError:
         parse_process_spec,
     )
     from scripts.validate_lad_xml import (  # type: ignore
-        build_power_graph,
-        collect_defined_symbols,
-        series_contacts_of_coil,
+        collect_project_coil_series,
         validate_project_xmls,
     )
 
@@ -123,10 +119,16 @@ def _try_gemini_multimodal_extract(
     pdf_paths: List[str],
     base_ir: Dict[str, Any],
     api_key: str,
-) -> Optional[Dict[str, Any]]:
-    """当显式提供 GEMINI_API_KEY 且 google-genai 可用时，调用 gemini-3.1-pro-preview 补充图纸机械约束"""
-    if genai is None or not api_key or not pdf_paths:
-        return None
+) -> Tuple[Optional[Dict[str, Any]], str]:
+    """当显式提供 GEMINI_API_KEY 且 google-genai 可用时，调用 Gemini 多模态模型补充图纸机械约束，并明确记录降级原因"""
+    if not pdf_paths:
+        return None, "未提供 PDF 图纸文件"
+    if not api_key:
+        return None, "未配置 GEMINI_API_KEY，已自动降级为本地确定性解析"
+    if genai is None:
+        return None, "当前环境未安装 google-genai，已自动降级为本地确定性解析"
+
+    model_name = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro").strip() or "gemini-2.5-pro"
     try:
         client = genai.Client(api_key=api_key)
         prompt = (
@@ -143,15 +145,15 @@ def _try_gemini_multimodal_extract(
                 mime = "application/pdf" if ext == ".pdf" else "image/png"
                 parts.append(genai.types.Part.from_bytes(data=data, mime_type=mime))
         resp = client.models.generate_content(
-            model="gemini-3.1-pro-preview",
+            model=model_name,
             contents=parts,
             config=genai.types.GenerateContentConfig(response_mime_type="application/json"),
         )
         if getattr(resp, "text", None):
-            return json.loads(resp.text)
-    except Exception:
-        return None
-    return None
+            return json.loads(resp.text), ""
+        return None, f"Gemini 模型 {model_name} 返回空响应，已降级为本地解析"
+    except Exception as exc:
+        return None, f"Gemini 多模态提取异常 ({model_name}: {exc})，已自动降级为本地解析"
 
 
 def extract_process_ir_from_drawings(
@@ -245,14 +247,17 @@ def extract_process_ir_from_drawings(
         "missing_clarifications": [],
     }
 
-    gemini_patch = _try_gemini_multimodal_extract(pdf_paths or [], base_ir, effective_key)
+    gemini_patch, fallback_reason = _try_gemini_multimodal_extract(pdf_paths or [], base_ir, effective_key)
     if gemini_patch:
-        base_ir["extraction_mode"] = "gemini_3_1_pro_multimodal"
+        base_ir["extraction_mode"] = "gemini_multimodal"
+        base_ir["fallback_reason"] = ""
         for k, v in (gemini_patch.get("valve_center_types") or {}).items():
             base_ir["valve_center_types"][k] = v
         for rule in (gemini_patch.get("extra_interlocks") or []):
             if isinstance(rule, dict) and rule.get("actuator"):
                 base_ir["interlocks"].append(rule)
+    else:
+        base_ir["fallback_reason"] = fallback_reason
 
     base_ir["missing_clarifications"] = generate_clarification_questions(base_ir)
     return base_ir
@@ -369,101 +374,6 @@ def export_fds_docx(
     return abs_out
 
 
-def _extract_coil_series_map(xml_dirs: List[str]) -> Tuple[Dict[str, List[Tuple[str, int, List[Tuple[str, bool]]]]], Dict[str, List[Tuple[str, bool]]]]:
-    """
-    基于 validate_lad_xml 的有向能流割点图，收集全工程所有线圈的必经串联触点，
-    并计算中间变量的安全/条件传递闭包（排除自锁旁路）。
-    """
-    coil_series: Dict[str, List[Tuple[str, int, List[Tuple[str, bool]]]]] = {}
-    var_direct_series: Dict[str, List[Tuple[str, bool]]] = {}
-
-    xml_files: List[str] = []
-    for d in xml_dirs:
-        if os.path.isdir(d):
-            for fn in sorted(os.listdir(d)):
-                if fn.lower().endswith(".xml"):
-                    xml_files.append(os.path.join(d, fn))
-
-    for fp in xml_files:
-        try:
-            with open(fp, "r", encoding="utf-8-sig", errors="replace") as f:
-                root = ET.fromstring(f.read())
-        except Exception:
-            continue
-
-        blk_el = root.find(".//SW.Blocks.FC")
-        if blk_el is None:
-            blk_el = root.find(".//SW.Blocks.FB")
-        if blk_el is None:
-            continue
-        bname_el = blk_el.find("AttributeList/Name")
-        bname = (bname_el.text or "").strip() if bname_el is not None else os.path.basename(fp)
-
-        for nw_idx, cu in enumerate(root.findall(".//SW.Blocks.CompileUnit"), start=1):
-            flg = cu.find(".//{*}FlgNet")
-            if flg is None:
-                continue
-            parts_el = flg.find("{*}Parts")
-            wires_el = flg.find("{*}Wires")
-            if parts_el is None or wires_el is None:
-                continue
-
-            uid_to_sym: Dict[str, str] = {}
-            part_info_by_uid: Dict[str, Dict[str, Any]] = {}
-            for ch in parts_el:
-                uid = ch.attrib.get("UId", "")
-                tag = ch.tag.split("}")[-1]
-                if not uid:
-                    continue
-                if tag == "Access":
-                    comps = [c.attrib.get("Name", "") for c in ch.findall(".//{*}Component") if c.attrib.get("Name")]
-                    if comps:
-                        uid_to_sym[uid] = ".".join(comps[:2]) if len(comps) >= 2 else comps[0]
-                elif tag == "Part":
-                    part_info_by_uid[uid] = {
-                        "tag": "Part",
-                        "name": ch.attrib.get("Name", ""),
-                        "negated": ch.find("{*}Negated[@Name='operand']") is not None,
-                        "elem": ch,
-                    }
-
-            contact_uid_to_var: Dict[str, str] = {}
-            coil_uids: List[Tuple[str, str, str]] = []
-            for w in wires_el:
-                id_uids = [sub.attrib.get("UId", "") for sub in w if sub.tag.split("}")[-1] == "IdentCon"]
-                ncs = [(sub.attrib.get("UId", ""), sub.attrib.get("Name", "")) for sub in w if sub.tag.split("}")[-1] == "NameCon"]
-                for iu in id_uids:
-                    sym = uid_to_sym.get(iu)
-                    if not sym:
-                        continue
-                    for pu, pin in ncs:
-                        if pin == "operand":
-                            pn = part_info_by_uid.get(pu, {}).get("name", "")
-                            if pn == "Contact":
-                                contact_uid_to_var[pu] = sym
-                            elif pn in ("Coil", "SCoil"):
-                                coil_uids.append((pu, sym, pn))
-
-            if not coil_uids:
-                continue
-            edges = build_power_graph(wires_el, part_info_by_uid)
-            c_uids = list(contact_uid_to_var.keys())
-            for cu_id, c_var, _ in coil_uids:
-                sc = series_contacts_of_coil(edges, cu_id, c_uids)
-                if sc is None:
-                    continue
-                series_pairs = [
-                    (contact_uid_to_var[u], bool(part_info_by_uid[u].get("negated")))
-                    for u in sc
-                    if contact_uid_to_var[u] != c_var
-                ]
-                coil_series.setdefault(c_var, []).append((bname, nw_idx, series_pairs))
-                if c_var not in var_direct_series:
-                    var_direct_series[c_var] = list(series_pairs)
-
-    return coil_series, var_direct_series
-
-
 def _collect_transitive_series(
     series_pairs: List[Tuple[str, bool]],
     var_direct_series: Dict[str, List[Tuple[str, bool]]],
@@ -489,18 +399,21 @@ def run_local_safety_critic(
     ir_data: Dict[str, Any],
     eplan_io_path: Optional[str] = None,
     tia_status_json_path: Optional[str] = None,
+    strict_compact: bool = False,
 ) -> Dict[str, Any]:
     """
-    本地 Safety Critic 形式化审查器（Google ADK critic_agent 模式）：
+    本地 Safety Critic 形式化审查器（Google ADK critic_agent 模式，支持直接线圈及 FB_StandardActuator 等 FB 实参穿透审查）：
       1. 运行 validate_project_xmls 执行全量静态语法与 S1~S5 拓扑审计；
       2. 对照 ir_data['interlocks'] 安全联锁矩阵，利用有向能流割点验证每个被保护执行器的
          必经串联主干路是否真正串入了所有 required_permissives 与 mutex_coils；
-      3. 不达标时生成精确的重写指令 (revision_directives)，驱动 lad_builder.py 重写自愈。
+      3. strict_compact=True 时严格执行反碎片化拦截，打回过渡 %M 位、跨段 S/R 与迷你空壳 FC；
+      4. 不达标时生成精确的重写指令 (revision_directives)，驱动 lad_builder.py 重写自愈。
     """
     static_res = validate_project_xmls(
         xml_dir,
         eplan_io_path=eplan_io_path,
         tia_status_json_path=tia_status_json_path,
+        check_compact=True,
     )
 
     violations: List[Dict[str, Any]] = []
@@ -516,13 +429,25 @@ def run_local_safety_critic(
         })
         revision_directives.append(f"修复静态安全/拓扑错误: {err}")
 
+    if strict_compact:
+        for af in getattr(static_res, "anti_fragmentation_findings", []):
+            violations.append({
+                "code": af.get("code", "ANTI_FRAGMENTATION"),
+                "block": af.get("block", ""),
+                "network": af.get("network", 0),
+                "actuator": af.get("target", ""),
+                "message": af.get("message", ""),
+            })
+            if af.get("directive"):
+                revision_directives.append(af["directive"])
+
     parent_dir = os.path.dirname(os.path.abspath(xml_dir))
     scan_dirs = [xml_dir]
     sibling_tag_dir = os.path.join(parent_dir, "02_变量表")
     if os.path.isdir(sibling_tag_dir):
         scan_dirs.append(sibling_tag_dir)
 
-    coil_series, var_direct_series = _extract_coil_series_map(scan_dirs)
+    coil_series, var_direct_series = collect_project_coil_series(scan_dirs)
 
     for rule in ir_data.get("interlocks", []):
         act = str(rule.get("actuator", "")).strip()

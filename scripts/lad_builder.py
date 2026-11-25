@@ -11,6 +11,11 @@
 import os
 from typing import List, Dict, Any, Optional, Union, Tuple
 
+try:
+    from common_utils import escape_xml as _escape_xml, write_utf8_bom_crlf
+except ImportError:
+    from scripts.common_utils import escape_xml as _escape_xml, write_utf8_bom_crlf  # type: ignore
+
 
 def _normalize_contact(c: Any) -> Dict[str, Any]:
     """兼容 dict {'name': ..., 'negated': ...} 与元组 (name, negated) 写法"""
@@ -23,17 +28,6 @@ def _normalize_contact(c: Any) -> Dict[str, Any]:
             "scope": str(c[2]) if len(c) > 2 else "GlobalVariable",
         }
     return {"name": str(c), "negated": False}
-
-
-def _escape_xml(val: Any) -> str:
-    """转义 XML 特殊字符"""
-    return (
-        str(val)
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-    )
 
 
 class LadNetworkBuilder:
@@ -642,6 +636,627 @@ def build_step_latch_network(
     )
 
 
+def _append_branch_or_series(
+    builder: LadNetworkBuilder,
+    branches: Optional[List[List[Any]]],
+    pre_contacts: Optional[List[Any]],
+    series_after: Optional[List[Any]],
+    rail_targets: List[Tuple[str, str]],
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    在已有 LadNetworkBuilder 中构建可选前置触点、多支路并联(O)与后置串联触点，
+    返回末端输出节点 (tail_uid, tail_pin)；若全为空则返回 (None, None)。
+    """
+    tail_uid: Optional[str] = None
+    tail_pin: Optional[str] = None
+
+    pre_list = list(pre_contacts or [])
+    if pre_list:
+        p_first, p_last = _append_contact_chain(builder, pre_list)
+        rail_targets.append((p_first, "in"))
+        tail_uid, tail_pin = p_last, "out"
+
+    valid_branches = [list(b) for b in (branches or []) if b]
+    if len(valid_branches) == 1:
+        b_first, b_last = _append_contact_chain(builder, valid_branches[0])
+        if tail_uid is not None and tail_pin is not None:
+            builder.wires.append(
+                f'    <Wire UId="{builder.alloc_uid()}"><NameCon UId="{tail_uid}" Name="{tail_pin}" /><NameCon UId="{b_first}" Name="in" /></Wire>'
+            )
+        else:
+            rail_targets.append((b_first, "in"))
+        tail_uid, tail_pin = b_last, "out"
+    elif len(valid_branches) > 1:
+        branch_firsts: List[str] = []
+        branch_lasts: List[str] = []
+        for br in valid_branches:
+            bf, bl = _append_contact_chain(builder, br)
+            branch_firsts.append(bf)
+            branch_lasts.append(bl)
+        if tail_uid is not None and tail_pin is not None:
+            targets_xml = "".join(f'<NameCon UId="{u}" Name="in" />' for u in branch_firsts)
+            builder.wires.append(
+                f'    <Wire UId="{builder.alloc_uid()}"><NameCon UId="{tail_uid}" Name="{tail_pin}" />{targets_xml}</Wire>'
+            )
+        else:
+            for bf in branch_firsts:
+                rail_targets.append((bf, "in"))
+
+        or_uid = builder.alloc_uid()
+        builder.parts.append(
+            f'    <Part Name="O" UId="{or_uid}"><TemplateValue Name="Card" Type="Cardinality">{len(valid_branches)}</TemplateValue></Part>'
+        )
+        for idx, bl in enumerate(branch_lasts, start=1):
+            builder.wires.append(
+                f'    <Wire UId="{builder.alloc_uid()}"><NameCon UId="{bl}" Name="out" /><NameCon UId="{or_uid}" Name="in{idx}" /></Wire>'
+            )
+        tail_uid, tail_pin = or_uid, "out"
+
+    after_list = list(series_after or [])
+    if after_list:
+        s_first, s_last = _append_contact_chain(builder, after_list)
+        if tail_uid is not None and tail_pin is not None:
+            builder.wires.append(
+                f'    <Wire UId="{builder.alloc_uid()}"><NameCon UId="{tail_uid}" Name="{tail_pin}" /><NameCon UId="{s_first}" Name="in" /></Wire>'
+            )
+        else:
+            rail_targets.append((s_first, "in"))
+        tail_uid, tail_pin = s_last, "out"
+
+    return tail_uid, tail_pin
+
+
+def build_composite_network(
+    nw_index: int,
+    title: str,
+    comment: str,
+    rungs: List[Dict[str, Any]],
+) -> str:
+    """
+    通用单程序段多梯级/多分支构建底座：
+    在一个 CompileUnit (<FlgNet>) 内按 rungs 顺序构建多条关联梯级（Multi-Rung），
+    统一汇总至唯一一根 <Powerrail /> Wire，并支持内联 TON/TOF/TP、PBox/NBox 与 T 型分叉多线圈输出。
+
+    每条 rung 字典支持字段:
+      - pre_contacts: 可选前置串联触点列表（位于 O 分叉之前）
+      - branches: 可选多支路并联列表 List[List[contact]]
+      - contacts / series_after: 可选串联触点列表（若未传 branches 则直接串联）
+      - edge: 可选 {'bit_var': str, 'type': 'PBox'|'NBox', 'scope': 'GlobalVariable'}
+      - ton: 可选 {'member': str, 'pt': str, 'db_name': '全局定时器', 'type': 'TON'|'TOF'|'TP',
+                   'scope': 'GlobalVariable', 'pt_scope': 'TypedConstant', 'et_var': None,
+                   'et_scope': 'GlobalVariable', 'post_contacts': []}
+      - outputs: 可选输出列表 [{'var': str, 'type': 'Coil'|'SCoil'|'RCoil'|'NCoil'|'PCoil',
+                                'scope': 'GlobalVariable', 'negated': False, 'bit_var': None,
+                                'branch_contacts': [...]}]
+      - coil_var / coil_type / coil_scope / coil_negated: 单输出简写形式
+    """
+    if not rungs:
+        raise ValueError("build_composite_network 至少需要 1 条 rung 梯级")
+
+    builder = LadNetworkBuilder(nw_index, title, comment)
+    rail_targets: List[Tuple[str, str]] = []
+
+    for rung in rungs:
+        pre_contacts = rung.get("pre_contacts")
+        branches = rung.get("branches")
+        if "contacts" in rung and "series_after" in rung:
+            series_after = list(rung.get("contacts") or []) + list(rung.get("series_after") or [])
+        else:
+            series_after = rung.get("series_after") if rung.get("series_after") is not None else rung.get("contacts")
+
+        tail_uid, tail_pin = _append_branch_or_series(
+            builder,
+            branches=branches,
+            pre_contacts=pre_contacts,
+            series_after=series_after,
+            rail_targets=rail_targets,
+        )
+
+        # 可选边沿检测指令 PBox / NBox
+        edge_cfg = rung.get("edge")
+        if edge_cfg:
+            edge_type = str(edge_cfg.get("type", "PBox")).strip() or "PBox"
+            edge_bit = str(edge_cfg["bit_var"])
+            edge_scope = str(edge_cfg.get("scope", "GlobalVariable")).strip() or "GlobalVariable"
+            edge_acc = builder.add_access(edge_bit, edge_scope)
+            edge_uid = builder.alloc_uid()
+            builder.parts.append(f'    <Part Name="{_escape_xml(edge_type)}" UId="{edge_uid}" />')
+            if tail_uid is not None and tail_pin is not None:
+                builder.wires.append(
+                    f'    <Wire UId="{builder.alloc_uid()}"><NameCon UId="{tail_uid}" Name="{tail_pin}" /><NameCon UId="{edge_uid}" Name="in" /></Wire>'
+                )
+            else:
+                rail_targets.append((edge_uid, "in"))
+            builder.wires.append(
+                f'    <Wire UId="{builder.alloc_uid()}"><IdentCon UId="{edge_acc}" /><NameCon UId="{edge_uid}" Name="bit" /></Wire>'
+            )
+            tail_uid, tail_pin = edge_uid, "out"
+
+        # 可选内联定时器指令 TON / TOF / TP
+        ton_cfg = rung.get("ton")
+        if ton_cfg:
+            t_type = str(ton_cfg.get("type", "TON")).strip() or "TON"
+            t_member = str(ton_cfg["member"]).strip()
+            t_db = str(ton_cfg.get("db_name", "全局定时器")).strip()
+            t_scope = str(ton_cfg.get("scope", "GlobalVariable")).strip() or "GlobalVariable"
+            t_pt = str(ton_cfg.get("pt", "T#5S")).strip()
+            t_pt_scope = str(ton_cfg.get("pt_scope", "TypedConstant")).strip() or "TypedConstant"
+            et_var = ton_cfg.get("et_var")
+            et_scope = str(ton_cfg.get("et_scope", "GlobalVariable")).strip() or "GlobalVariable"
+
+            if t_pt_scope == "TypedConstant":
+                pt_acc = builder.add_typed_time_constant(t_pt)
+            else:
+                pt_acc = builder.add_access(t_pt, t_pt_scope)
+
+            ton_uid = builder.alloc_uid()
+            inst_uid = builder.alloc_uid()
+            member_segs = [seg.strip() for seg in t_member.split(".") if seg.strip()]
+            inst_comps: List[str] = []
+            if t_scope == "GlobalVariable" and t_db and (not member_segs or member_segs[0] != t_db):
+                inst_comps.append(f'<Component Name="{_escape_xml(t_db)}" />')
+            for seg in member_segs:
+                inst_comps.append(f'<Component Name="{_escape_xml(seg)}" />')
+            ton_xml = (
+                f'    <Part Name="{_escape_xml(t_type)}" Version="1.0" UId="{ton_uid}">\n'
+                f'      <Instance Scope="{_escape_xml(t_scope)}" UId="{inst_uid}">\n'
+                f'        {"".join(inst_comps)}\n'
+                f'      </Instance>\n'
+                f'      <TemplateValue Name="time_type" Type="Type">Time</TemplateValue>\n'
+                f'    </Part>'
+            )
+            builder.parts.append(ton_xml)
+
+            if tail_uid is not None and tail_pin is not None:
+                builder.wires.append(
+                    f'    <Wire UId="{builder.alloc_uid()}"><NameCon UId="{tail_uid}" Name="{tail_pin}" /><NameCon UId="{ton_uid}" Name="IN" /></Wire>'
+                )
+            else:
+                rail_targets.append((ton_uid, "IN"))
+
+            builder.wires.append(
+                f'    <Wire UId="{builder.alloc_uid()}"><IdentCon UId="{pt_acc}" /><NameCon UId="{ton_uid}" Name="PT" /></Wire>'
+            )
+            if et_var:
+                et_acc = builder.add_access(str(et_var), et_scope)
+                builder.wires.append(
+                    f'    <Wire UId="{builder.alloc_uid()}"><NameCon UId="{ton_uid}" Name="ET" /><IdentCon UId="{et_acc}" /></Wire>'
+                )
+            else:
+                open_uid = builder.alloc_uid()
+                builder.wires.append(
+                    f'    <Wire UId="{builder.alloc_uid()}"><NameCon UId="{ton_uid}" Name="ET" /><OpenCon UId="{open_uid}" /></Wire>'
+                )
+            tail_uid, tail_pin = ton_uid, "Q"
+
+            post_contacts = list(ton_cfg.get("post_contacts") or [])
+            if post_contacts:
+                p_first, p_last = _append_contact_chain(builder, post_contacts)
+                builder.wires.append(
+                    f'    <Wire UId="{builder.alloc_uid()}"><NameCon UId="{tail_uid}" Name="{tail_pin}" /><NameCon UId="{p_first}" Name="in" /></Wire>'
+                )
+                tail_uid, tail_pin = p_last, "out"
+
+        # 收集本梯级输出线圈（支持 T 型分叉多线圈）
+        outputs = list(rung.get("outputs") or [])
+        if not outputs and rung.get("coil_var"):
+            outputs = [{
+                "var": rung["coil_var"],
+                "type": rung.get("coil_type", "Coil"),
+                "scope": rung.get("coil_scope", "GlobalVariable"),
+                "negated": bool(rung.get("coil_negated", False)),
+            }]
+
+        if outputs:
+            entry_pins: List[Tuple[str, str]] = []
+            for out_cfg in outputs:
+                out_var = str(out_cfg["var"])
+                out_type = str(out_cfg.get("type", "Coil")).strip() or "Coil"
+                out_scope = str(out_cfg.get("scope", "GlobalVariable")).strip() or "GlobalVariable"
+                out_neg = bool(out_cfg.get("negated", False))
+                sub_contacts = list(out_cfg.get("branch_contacts") or [])
+
+                coil_acc = builder.add_access(out_var, out_scope)
+                coil_uid = builder.alloc_uid()
+                if out_neg:
+                    builder.parts.append(
+                        f'    <Part Name="{_escape_xml(out_type)}" UId="{coil_uid}"><Negated Name="operand" /></Part>'
+                    )
+                else:
+                    builder.parts.append(f'    <Part Name="{_escape_xml(out_type)}" UId="{coil_uid}" />')
+                builder.wires.append(
+                    f'    <Wire UId="{builder.alloc_uid()}"><IdentCon UId="{coil_acc}" /><NameCon UId="{coil_uid}" Name="operand" /></Wire>'
+                )
+                if out_type in ("NCoil", "PCoil") and out_cfg.get("bit_var"):
+                    bit_acc = builder.add_access(str(out_cfg["bit_var"]), out_cfg.get("bit_scope", "GlobalVariable"))
+                    builder.wires.append(
+                        f'    <Wire UId="{builder.alloc_uid()}"><IdentCon UId="{bit_acc}" /><NameCon UId="{coil_uid}" Name="bit" /></Wire>'
+                    )
+
+                if sub_contacts:
+                    sf, sl = _append_contact_chain(builder, sub_contacts)
+                    builder.wires.append(
+                        f'    <Wire UId="{builder.alloc_uid()}"><NameCon UId="{sl}" Name="out" /><NameCon UId="{coil_uid}" Name="in" /></Wire>'
+                    )
+                    entry_pins.append((sf, "in"))
+                else:
+                    entry_pins.append((coil_uid, "in"))
+
+            if tail_uid is not None and tail_pin is not None:
+                dst_xml = "".join(f'<NameCon UId="{u}" Name="{p}" />' for u, p in entry_pins)
+                builder.wires.append(
+                    f'    <Wire UId="{builder.alloc_uid()}"><NameCon UId="{tail_uid}" Name="{tail_pin}" />{dst_xml}</Wire>'
+                )
+            else:
+                rail_targets.extend(entry_pins)
+
+    if not rail_targets:
+        raise ValueError("build_composite_network 生成的梯级未产生任何左母线连接目标")
+
+    rail_targets_xml = "".join(f'<NameCon UId="{u}" Name="{p}" />' for u, p in rail_targets)
+    builder.wires.insert(0, f'    <Wire UId="{builder.alloc_uid()}"><Powerrail />{rail_targets_xml}</Wire>')
+
+    return render_network_xml(builder)
+
+
+def build_sr_latch_network(
+    nw_index: int,
+    title: str,
+    comment: str,
+    target_var: str,
+    set_branches: List[List[Any]],
+    reset_branches: List[List[Any]],
+    set_series_after: Optional[List[Any]] = None,
+    reset_series_after: Optional[List[Any]] = None,
+    target_scope: str = "GlobalVariable",
+) -> str:
+    """将同一变量的成对 SCoil (置位) 与 RCoil (复位) 合并在同一个复合程序段中"""
+    return build_composite_network(
+        nw_index=nw_index,
+        title=title,
+        comment=comment,
+        rungs=[
+            {
+                "branches": set_branches,
+                "series_after": list(set_series_after or []),
+                "coil_var": target_var,
+                "coil_type": "SCoil",
+                "coil_scope": target_scope,
+            },
+            {
+                "branches": reset_branches,
+                "series_after": list(reset_series_after or []),
+                "coil_var": target_var,
+                "coil_type": "RCoil",
+                "coil_scope": target_scope,
+            },
+        ],
+    )
+
+
+def build_timeout_alarm_network(
+    nw_index: int,
+    title: str,
+    comment: str,
+    enable_contacts: List[Any],
+    timer_db_member: str,
+    time_pt: str,
+    alarm_var: str,
+    reset_contacts: List[Any],
+    timer_db_name: str = "全局定时器",
+    summary_alarms: Optional[List[Any]] = None,
+    summary_var: Optional[str] = None,
+) -> str:
+    """
+    构建“TON 计时直连 SCoil(报警) + 复位 RCoil(报警) [+ 可选报警汇总]”完整微功能闭环段，
+    彻底消灭如 M_超时脉冲到达 等一次性过渡 %M 桥接变量。
+    """
+    rungs: List[Dict[str, Any]] = [
+        {
+            "contacts": list(enable_contacts),
+            "ton": {
+                "member": timer_db_member,
+                "pt": time_pt,
+                "db_name": timer_db_name,
+            },
+            "coil_var": alarm_var,
+            "coil_type": "SCoil",
+        },
+        {
+            "contacts": list(reset_contacts),
+            "coil_var": alarm_var,
+            "coil_type": "RCoil",
+        },
+    ]
+    if summary_var and summary_alarms:
+        branches = [
+            b if isinstance(b, list) else [b]
+            for b in summary_alarms
+            if b
+        ]
+        if branches:
+            rungs.append({
+                "branches": branches,
+                "coil_var": summary_var,
+                "coil_type": "Coil",
+            })
+    return build_composite_network(nw_index=nw_index, title=title, comment=comment, rungs=rungs)
+
+
+def build_mode_select_network(
+    nw_index: int,
+    title: str,
+    comment: str,
+    selector_var: str,
+    auto_mode_var: str = "M_自动模式",
+    manual_mode_var: str = "M_手动模式",
+    safety_var: Optional[str] = "M_安全条件满足",
+    single_di_selector: bool = True,
+    manual_selector_var: Optional[str] = None,
+    extra_rungs: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """将手自动模式切换双梯级（及可选系统运行/点动梯级）合并为同一个模式管理程序段"""
+    auto_contacts: List[Any] = [{"name": selector_var, "negated": False}]
+    if safety_var:
+        auto_contacts.append({"name": safety_var, "negated": False})
+
+    if single_di_selector:
+        manual_contacts: List[Any] = [{"name": selector_var, "negated": True}]
+    else:
+        man_sel = manual_selector_var or selector_var
+        manual_contacts = [
+            {"name": man_sel, "negated": False},
+            {"name": auto_mode_var, "negated": True},
+        ]
+    if safety_var:
+        manual_contacts.append({"name": safety_var, "negated": False})
+
+    rungs: List[Dict[str, Any]] = [
+        {"contacts": auto_contacts, "coil_var": auto_mode_var, "coil_type": "Coil"},
+        {"contacts": manual_contacts, "coil_var": manual_mode_var, "coil_type": "Coil"},
+    ]
+    for er in (extra_rungs or []):
+        if er:
+            rungs.append(er)
+    return build_composite_network(nw_index=nw_index, title=title, comment=comment, rungs=rungs)
+
+
+def build_step_with_timer_network(
+    nw_index: int,
+    title: str,
+    comment: str,
+    step_var: str,
+    trigger_contacts: List[Any],
+    timer_db_member: str,
+    time_pt: str,
+    next_step_vars: Optional[List[str]] = None,
+    mode_var: str = "M_自动模式",
+    safety_var: str = "M_安全条件满足",
+    alarm_summary_var: Optional[str] = "M_报警汇总",
+    extra_hold_contacts: Optional[List[Any]] = None,
+    timer_db_name: str = "全局定时器",
+    auto_exit_on_timer_done: bool = True,
+    timer_done_coil_var: Optional[str] = None,
+) -> str:
+    """
+    将“单步步序自锁 + 本步延时 TON 定时器”合并在同一个程序段中：
+      Rung 1: (trigger || step_var) -> mode -> safety -> -|/|- alarm -> -|/|- next_steps -> [-|/|- T.Q] -> step_var
+      Rung 2: step_var -> TON(timer_db_member, PT=time_pt) [-> timer_done_coil_var (可选)]
+    默认直接通过 全局定时器.<member>.Q 自复位步序，无需任何过渡 %M 标志位。
+    """
+    series_after: List[Dict[str, Any]] = []
+    if mode_var:
+        series_after.append({"name": mode_var, "negated": False})
+    if safety_var:
+        series_after.append({"name": safety_var, "negated": False})
+    if alarm_summary_var:
+        series_after.append({"name": alarm_summary_var, "negated": True})
+    for ns in (next_step_vars or []):
+        if ns:
+            series_after.append({"name": ns, "negated": True})
+    if auto_exit_on_timer_done:
+        series_after.append({"name": f"{timer_db_name}.{timer_db_member}.Q", "negated": True})
+    for ec in (extra_hold_contacts or []):
+        series_after.append(_normalize_contact(ec))
+
+    rung_step: Dict[str, Any] = {
+        "branches": [list(trigger_contacts), [{"name": step_var, "negated": False}]],
+        "series_after": series_after,
+        "coil_var": step_var,
+        "coil_type": "Coil",
+    }
+    rung_ton: Dict[str, Any] = {
+        "contacts": [{"name": step_var, "negated": False}],
+        "ton": {
+            "member": timer_db_member,
+            "pt": time_pt,
+            "db_name": timer_db_name,
+        },
+    }
+    if timer_done_coil_var:
+        rung_ton["coil_var"] = timer_done_coil_var
+        rung_ton["coil_type"] = "Coil"
+
+    return build_composite_network(
+        nw_index=nw_index,
+        title=title,
+        comment=comment,
+        rungs=[rung_step, rung_ton],
+    )
+
+
+def build_dual_interlocked_actuators_network(
+    nw_index: int,
+    title: str,
+    comment: str,
+    actuator_a: Dict[str, Any],
+    actuator_b: Dict[str, Any],
+    safety_var: str = "M_安全条件满足",
+    manual_mode_var: str = "M_手动模式",
+    auto_mode_var: str = "M_自动模式",
+) -> str:
+    """
+    将同一台物理设备的成对互斥执行器（如电机正转+反转、双电控气缸伸出+缩回）合并为 1 个复合程序段，
+    自动在各自 O 汇流节点后的公共串联主干路注入安全许可、外部防撞条件与对方常闭软件互锁（满足 S3/S4/S5）。
+
+    actuator_a / actuator_b 字典格式:
+      - coil_var: str (必填)
+      - manual_trigger_var / auto_request_var / manual_contacts / auto_contacts / extra_branches
+      - interlock_contacts: 可选列表
+      - coil_type / coil_scope
+    """
+    coil_a = str(actuator_a["coil_var"])
+    coil_b = str(actuator_b["coil_var"])
+
+    def _to_rung(cfg: Dict[str, Any], other_coil: str) -> Dict[str, Any]:
+        branches: List[List[Any]] = []
+        if cfg.get("manual_contacts"):
+            branches.append(list(cfg["manual_contacts"]))
+        elif cfg.get("manual_trigger_var"):
+            branches.append([
+                {"name": cfg["manual_trigger_var"], "negated": False},
+                {"name": manual_mode_var, "negated": False},
+            ])
+        if cfg.get("auto_contacts"):
+            branches.append(list(cfg["auto_contacts"]))
+        elif cfg.get("auto_request_var"):
+            branches.append([
+                {"name": cfg["auto_request_var"], "negated": False},
+                {"name": auto_mode_var, "negated": False},
+            ])
+        for eb in (cfg.get("extra_branches") or []):
+            if eb:
+                branches.append(list(eb))
+
+        interlocks = [_normalize_contact(c) for c in (cfg.get("interlock_contacts") or [])]
+        if safety_var and not any(c.get("name") == safety_var and not c.get("negated", False) for c in interlocks):
+            interlocks.insert(0, {"name": safety_var, "negated": False})
+        if not any(c.get("name") == other_coil and c.get("negated", False) for c in interlocks):
+            interlocks.append({"name": other_coil, "negated": True})
+
+        return {
+            "branches": branches,
+            "series_after": interlocks,
+            "coil_var": cfg["coil_var"],
+            "coil_type": cfg.get("coil_type", "Coil"),
+            "coil_scope": cfg.get("coil_scope", "GlobalVariable"),
+        }
+
+    return build_composite_network(
+        nw_index=nw_index,
+        title=title,
+        comment=comment,
+        rungs=[_to_rung(actuator_a, coil_b), _to_rung(actuator_b, coil_a)],
+    )
+
+
+def build_star_delta_networks(
+    start_nw_index: int,
+    device_label: str,
+    start_contacts: List[Any],
+    stop_contacts: List[Any],
+    km_main: str,
+    km_star: str,
+    km_delta: str,
+    timer_switch_member: str,
+    timer_delay_member: str,
+    switch_pt: str = "T#6S",
+    delay_pt: str = "T#300MS",
+    safety_var: str = "M_安全条件满足",
+    timer_db_name: str = "全局定时器",
+) -> List[str]:
+    """
+    2 段式紧凑星三角降压启动模板（由传统 5 段压至 2 段，0 过渡 %M 变量）：
+      NW1: 主接触器启保停自锁 + 星形切换定时器 TON(T1) + 换接死区延时定时器 TON(T2)
+      NW2: 星形接触器(KM_Star)与角形接触器(KM_Delta)互锁输出双梯级（直接引用 T1.Q / T2.Q）
+    """
+    stop_chain = [_normalize_contact(c) for c in stop_contacts]
+    if safety_var and not any(c.get("name") == safety_var and not c.get("negated", False) for c in stop_chain):
+        stop_chain.append({"name": safety_var, "negated": False})
+
+    t_switch_q = f"{timer_db_name}.{timer_switch_member}.Q"
+    t_delay_q = f"{timer_db_name}.{timer_delay_member}.Q"
+
+    nw1 = build_composite_network(
+        nw_index=start_nw_index,
+        title=f"NW{start_nw_index} {device_label} —— 主接触器启保停与星三角切换计时",
+        comment=(
+            f"【功能】控制主接触器 {km_main} 启保停自锁，并在吸合后驱动星形计时({switch_pt})与换接死区延时({delay_pt})。\n"
+            f"【动作说明】主接触器 {km_main} 吸合且 {km_delta} 未吸合时计时 {timer_switch_member}；"
+            f"{switch_pt} 到期且 {km_star} 断开后触发 {timer_delay_member} 防电弧死区延时。\n"
+            "【调试提示】星形运行时间可在 4~10S 间按电机功率与惯量微调。"
+        ),
+        rungs=[
+            {
+                "branches": [list(start_contacts), [{"name": km_main, "negated": False}]],
+                "series_after": stop_chain,
+                "coil_var": km_main,
+            },
+            {
+                "contacts": [{"name": km_main, "negated": False}, {"name": km_delta, "negated": True}],
+                "ton": {"member": timer_switch_member, "pt": switch_pt, "db_name": timer_db_name},
+            },
+            {
+                "contacts": [
+                    {"name": km_main, "negated": False},
+                    {"name": t_switch_q, "negated": False},
+                    {"name": km_star, "negated": True},
+                ],
+                "ton": {"member": timer_delay_member, "pt": delay_pt, "db_name": timer_db_name},
+            },
+        ],
+    )
+
+    nw2 = build_composite_network(
+        nw_index=start_nw_index + 1,
+        title=f"NW{start_nw_index + 1} {device_label} —— 星形/角形接触器互锁切换输出",
+        comment=(
+            f"【功能】在 {km_main} 吸合期间先接通星形 {km_star}，经 {switch_pt}+{delay_pt} 死区切换后自锁接通角形 {km_delta}。\n"
+            f"【互锁说明】{km_star} 与 {km_delta} 严格软件常闭互锁（须配合硬件常闭互锁），角形自锁支路位于 {km_main} 之后，停机或安全断开瞬间同步失电。"
+        ),
+        rungs=[
+            {
+                "contacts": [
+                    {"name": km_main, "negated": False},
+                    {"name": t_switch_q, "negated": True},
+                    {"name": km_delta, "negated": True},
+                ],
+                "coil_var": km_star,
+            },
+            {
+                "pre_contacts": [{"name": km_main, "negated": False}],
+                "branches": [
+                    [{"name": t_delay_q, "negated": False}],
+                    [{"name": km_delta, "negated": False}],
+                ],
+                "series_after": [{"name": km_star, "negated": True}],
+                "coil_var": km_delta,
+            },
+        ],
+    )
+    return [nw1, nw2]
+
+
+def build_indicator_lamps_network(
+    nw_index: int,
+    title: str,
+    comment: str,
+    lamp_rungs: List[Dict[str, Any]],
+) -> str:
+    """将同工位或全线状态指示灯组（运行灯、故障灯、急停灯等）合并为 1 个复合程序段"""
+    rungs: List[Dict[str, Any]] = []
+    for lr in lamp_rungs:
+        rungs.append({
+            "branches": lr.get("branches"),
+            "contacts": lr.get("contacts"),
+            "series_after": lr.get("series_after"),
+            "coil_var": lr["coil_var"],
+            "coil_type": lr.get("coil_type", "Coil"),
+            "coil_scope": lr.get("coil_scope", "GlobalVariable"),
+        })
+    return build_composite_network(nw_index=nw_index, title=title, comment=comment, rungs=rungs)
+
+
 def render_network_xml(builder: LadNetworkBuilder) -> str:
     """将程序段组装为标准 SimaticML CompileUnit XML"""
     hex_id = hex(builder.nw_index * 5 + 3)[2:]
@@ -987,6 +1602,7 @@ def build_line_handover_networks(
     transfer_actuator_req_var: str,
     safety_var: str = "M_安全条件满足",
     fault_var: str = "M_报警汇总",
+    compact: bool = False,
 ) -> List[str]:
     """
     依据 references/10_Line_Coordination_Patterns.md 第 4 节生成跨工位四步闭环交接握手 LAD 程序段：
@@ -994,6 +1610,8 @@ def build_line_handover_networks(
       Step 2: 交接传输激活 TransferActive
       Step 3: 下游到位确认 TransferDone
       Step 4: 输出交接传输执行器请求位
+    compact=False（默认向后兼容）：输出 4 个独立程序段；
+    compact=True（紧凑合段模式）：合并为 2 个复合程序段（NW1 请求与传输激活，NW2 到位确认与执行请求输出）。
     支持 handover_prefix 为结构体路径（如 DB_工位交接.OP10_OP20）或变量前缀。
     """
     prefix = str(handover_prefix).strip().rstrip(".")
@@ -1001,6 +1619,79 @@ def build_line_handover_networks(
     active_var = f"{prefix}.TransferActive"
     done_var = f"{prefix}.TransferDone"
     fault_stop_var = f"{prefix}.FaultStop"
+
+    if compact:
+        nw_req_active = build_composite_network(
+            nw_index=start_nw_index,
+            title=f"NW{start_nw_index} {upstream_station}->{downstream_station} 交接请求与传输激活",
+            comment=(
+                f"【工位交接 Step 1+2】\n"
+                f"支路1：{upstream_station} 完成且 {downstream_station} 就绪时自锁 ReqToNext。\n"
+                f"支路2：双方就绪且安全无故障时置位 TransferActive 准备传输。"
+            ),
+            rungs=[
+                {
+                    "branches": [
+                        [
+                            {"name": upstream_done_var, "negated": False},
+                            {"name": downstream_ready_var, "negated": False},
+                        ],
+                        [{"name": req_var, "negated": False}],
+                    ],
+                    "series_after": [
+                        {"name": safety_var, "negated": False},
+                        {"name": fault_var, "negated": True},
+                        {"name": done_var, "negated": True},
+                    ],
+                    "coil_var": req_var,
+                },
+                {
+                    "contacts": [
+                        {"name": req_var, "negated": False},
+                        {"name": downstream_ready_var, "negated": False},
+                        {"name": safety_var, "negated": False},
+                        {"name": fault_var, "negated": True},
+                        {"name": done_var, "negated": True},
+                    ],
+                    "coil_var": active_var,
+                },
+            ],
+        )
+        nw_done_out = build_composite_network(
+            nw_index=start_nw_index + 1,
+            title=f"NW{start_nw_index + 1} {upstream_station}->{downstream_station} 接料确认与传输请求输出",
+            comment=(
+                f"【工位交接 Step 3+4】\n"
+                f"支路1：下游传感器 {downstream_arrived_var} 到位自锁 TransferDone；撤除 {downstream_ready_var} 后释放解锁下一循环。\n"
+                f"支路2：TransferActive 有效且无故障挂起时输出执行器请求。"
+            ),
+            rungs=[
+                {
+                    "branches": [
+                        [
+                            {"name": active_var, "negated": False},
+                            {"name": downstream_arrived_var, "negated": False},
+                        ],
+                        [{"name": done_var, "negated": False}],
+                    ],
+                    "series_after": [
+                        {"name": downstream_ready_var, "negated": False},
+                        {"name": safety_var, "negated": False},
+                        {"name": fault_var, "negated": True},
+                    ],
+                    "coil_var": done_var,
+                },
+                {
+                    "contacts": [
+                        {"name": active_var, "negated": False},
+                        {"name": safety_var, "negated": False},
+                        {"name": fault_stop_var, "negated": True},
+                    ],
+                    "coil_var": transfer_actuator_req_var,
+                },
+            ],
+        )
+        return [nw_req_active, nw_done_out]
 
     nw1 = build_or_branches_series_network(
         nw_index=start_nw_index,
@@ -1038,7 +1729,7 @@ def build_line_handover_networks(
     nw3 = build_or_branches_series_network(
         nw_index=start_nw_index + 2,
         title=f"NW{start_nw_index + 2} {downstream_station} 接料到位确认 (TransferDone)",
-        comment=f"【工位交接 Step 3】下游进料传感器 {downstream_arrived_var} 到位后保持 TransferDone 直到下游复位就绪位。",
+        comment=f"【工位交接 Step 3】下游进料传感器 {downstream_arrived_var} 到位后置位自锁 TransferDone；待下游收到确认并撤除 {downstream_ready_var}=0 时自动复位以解锁下一工件循环。",
         branches=[
             [
                 {"name": active_var, "negated": False},
@@ -1047,6 +1738,7 @@ def build_line_handover_networks(
             [{"name": done_var, "negated": False}],
         ],
         series_after=[
+            {"name": downstream_ready_var, "negated": False},
             {"name": safety_var, "negated": False},
             {"name": fault_var, "negated": True},
         ],
@@ -1151,9 +1843,5 @@ def build_ob1_xml(fc_names: List[Union[str, Dict[str, Any]]]) -> str:
 
 
 def write_xml_file(file_path: str, xml_content: str):
-    """确保带单 UTF-8 BOM 写入 XML 文件"""
-    os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
-    crlf_content = xml_content.replace("\r\n", "\n").replace("\n", "\r\n")
-    with open(file_path, "wb") as f:
-        f.write(b"\xef\xbb\xbf")
-        f.write(crlf_content.encode("utf-8"))
+    """确保带单 UTF-8 BOM + CRLF 写入 XML 文件"""
+    write_utf8_bom_crlf(file_path, xml_content)

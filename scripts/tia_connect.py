@@ -17,6 +17,11 @@ import sys
 from typing import Any, Dict, List, Optional
 
 try:
+    from common_utils import ensure_utf8_stdout, parse_address_bit_span
+except ImportError:
+    from scripts.common_utils import ensure_utf8_stdout, parse_address_bit_span  # type: ignore
+
+try:
     from pydantic import BaseModel, Field
     PYDANTIC_AVAILABLE = True
 except ImportError:
@@ -143,9 +148,17 @@ def _run_ps_script(script_name: str, args_list: List[str]) -> Dict[str, Any]:
     if not os.path.exists(ps_script):
         return {"Success": False, "error": f"缺少核心脚本: {ps_script}"}
 
-    cmd = ["powershell", "-ExecutionPolicy", "Bypass", "-File", ps_script] + args_list
+    cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps_script] + args_list
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, check=True, shell=False)
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=True,
+            shell=False,
+        )
         stdout = (proc.stdout or "").strip()
         idx = stdout.find("{")
         idx2 = stdout.find("[")
@@ -213,19 +226,10 @@ def _parse_addr_bit_span(addr: str):
     if not addr_u.startswith(("%I", "%Q")):
         return "Other", -1, -1
     io_type = "Input" if addr_u.startswith("%I") else "Output"
-    bit_m = re.match(r"^%[IQ](\d+)\.([0-7])$", addr_u)
-    if bit_m:
-        sb = int(bit_m.group(1)) * 8 + int(bit_m.group(2))
-        return io_type, sb, sb
-    width_m = re.match(r"^%[IQ]([BWD])(\d+)$", addr_u)
-    if width_m:
-        w = {"B": 8, "W": 16, "D": 32}[width_m.group(1)]
-        sb = int(width_m.group(2)) * 8
-        return io_type, sb, sb + w - 1
-    plain_m = re.match(r"^%[IQ](\d+)$", addr_u)
-    if plain_m:
-        sb = int(plain_m.group(1)) * 8
-        return io_type, sb, sb + 7
+    span = parse_address_bit_span(addr_u)
+    if span is not None:
+        _, sb, bit_len = span
+        return io_type, sb, sb + bit_len - 1
     return io_type, -1, -1
 
 
@@ -405,6 +409,8 @@ class LiveDataInput(BaseModel):
     values: Optional[Dict[str, Any]] = Field(None, description="待写入或强制的值字典")
     plc_ip: str = Field("192.168.0.1", description="PLC S7CommPlus IP 地址")
     port: int = Field(102, description="S7CommPlus TCP 端口 (默认 102)")
+    rack: int = Field(0, description="PLC 机架号 (默认 0)")
+    slot: int = Field(1, description="PLC 槽位号 (S7-1200/1500 默认 1)")
     human_approved_force: bool = Field(False, description="强制物理 %Q 输出时必须为 True")
     snapshot_file: Optional[str] = Field(None, description="离线/仿真状态快照 JSON 路径")
 
@@ -634,12 +640,12 @@ def tia_download_to_plc(
                 "ActionableErrorMessage": "高危操作拦截：严禁在未经现场工程师显式确认（human_approved=True）的情况下向真实 PLC 下载程序！请先向工程师展示 CompareResult 并确认安全清场。",
             }
 
-        if len(safe_token) < 8:
+        if not re.fullmatch(r"[0-9a-fA-F]{16}", safe_token):
             return {
                 "Success": False,
                 "BlockedBySafetyGate": True,
                 "GateReason": "MISSING_COMPARE_ONLINE_TOKEN",
-                "ActionableErrorMessage": "高危操作拦截：缺少有效的在线比对确认令牌（confirm_online_token）。请先调用 tia_compare_online 获取令牌并由工程师复核。",
+                "ActionableErrorMessage": "高危操作拦截：缺少有效的 16 位十六进制在线比对确认令牌（confirm_online_token）。请先调用 tia_compare_online 获取令牌并由工程师复核。",
             }
 
         if req.is_failsafe_plc and not req.first_manual_download_done:
@@ -715,12 +721,14 @@ def tia_live_data_channel(
     values: Optional[Dict[str, Any]] = None,
     plc_ip: str = "192.168.0.1",
     port: int = 102,
+    rack: int = 0,
+    slot: int = 1,
     human_approved_force: bool = False,
     snapshot_file: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     双通道实时数据读写槽位（对应 TCP 102 S7CommPlus / Snap7 live_data 与离散仿真快照架构）：
-    支持探活 TCP 102、读取实时 PLC / Snap7 或工程 XML 仿真快照，以及受人工门禁保护的物理输出强制。
+    支持探活 TCP 102、读取实时 PLC / Snap7 或工程 XML 仿真快照，以及受人工门禁保护的冷态强制预检。
     """
     try:
         req = LiveDataInput(
@@ -729,6 +737,8 @@ def tia_live_data_channel(
             values=values,
             plc_ip=plc_ip,
             port=port,
+            rack=rack,
+            slot=slot,
             human_approved_force=human_approved_force,
             snapshot_file=snapshot_file,
         )
@@ -747,10 +757,13 @@ def tia_live_data_channel(
                 }
             return {
                 "Success": True,
+                "DryRun": True,
+                "ExecutedOnPlc": False,
                 "Channel": "PlcForceTable/S7CommPlus",
                 "Endpoint": f"{safe_ip}:{int(req.port)}",
                 "ForcedValues": sanitize_for_log(req.values or {}),
-                "Mode": "ApprovedForceDispatch",
+                "Mode": "DryRunGuardPassed_ManualForceTableRequired",
+                "ActionableHint": "已通过人工安全门禁核验（DryRun），但当前 MCP 接口不直接写入物理强制表；请导入 ForceTable_*.xml 并在 TIA Portal 监控表中执行在线强制。",
             }
 
         if safe_action == "check_tcp_endpoint":
@@ -772,10 +785,10 @@ def tia_live_data_channel(
         # read_snapshot:
         #   1) 若 snapshot_file 为 JSON 文件，直接读取；
         #   2) 若 snapshot_file 为包含 LAD XML 的目录，执行 1 个仿真扫描周期产出快照；
-        #   3) 若未传 snapshot_file 且已安装 snap7 且 TCP 102 可达，通过 snap7 读取实时映像区；
-        #   4) 否则返回就绪槽位元数据。
+        #   3) 若未传 snapshot_file，尝试通过 snap7 读取实时映像区；失败时诚实返回 Success=False 与原因。
         snapshot_data: Dict[str, Any] = {}
-        data_source = "LiveDataSlotReady"
+        data_source = "LiveDataChannelUnavailable"
+        snap7_error = ""
         if req.snapshot_file:
             safe_snap = _validate_safe_path(req.snapshot_file, "snapshot_file")
             if os.path.isfile(safe_snap):
@@ -790,6 +803,14 @@ def tia_live_data_channel(
                 sim = LadScanCycleSimulator(safe_snap)
                 snapshot_data = sim.step_cycle(dt_sec=0.25)
                 data_source = "LadScanCycleSimulatorLiveStep"
+            else:
+                return {
+                    "Success": False,
+                    "Connected": False,
+                    "Channel": "DualPipe_LiveData_Slot",
+                    "Source": data_source,
+                    "ActionableErrorMessage": f"【可行动建议】指定的 snapshot_file 路径不存在: {safe_snap}",
+                }
         else:
             try:
                 import snap7  # type: ignore
@@ -797,7 +818,7 @@ def tia_live_data_channel(
                 with socket.create_connection((safe_ip, int(req.port)), timeout=0.5):
                     pass
                 client = snap7.client.Client()
-                client.connect(safe_ip, 0, 1, tcpport=int(req.port))
+                client.connect(safe_ip, int(req.rack), int(req.slot), tcpport=int(req.port))
                 try:
                     pe_bytes = client.read_area(snap7.type.Areas.PE, 0, 0, 8)
                     pa_bytes = client.read_area(snap7.type.Areas.PA, 0, 0, 8)
@@ -808,13 +829,32 @@ def tia_live_data_channel(
                     data_source = "Snap7LivePlcTcp102"
                 finally:
                     client.disconnect()
-            except Exception:
-                pass
+            except ImportError:
+                snap7_error = "当前 Python 环境未安装 python-snap7 依赖"
+            except Exception as snap_ex:
+                snap7_error = str(snap_ex)
+
+            if data_source != "Snap7LivePlcTcp102":
+                return {
+                    "Success": False,
+                    "Connected": False,
+                    "Channel": "DualPipe_LiveData_Slot",
+                    "Protocol": "S7CommPlus/TCP102",
+                    "Endpoint": f"{safe_ip}:{int(req.port)}",
+                    "Source": data_source,
+                    "Snap7Error": sanitize_for_log(snap7_error),
+                    "ActionableErrorMessage": (
+                        f"【可行动建议】未能读取在线 PLC 实时映像区（{sanitize_for_log(snap7_error)}）。"
+                        "若连接真实 PLC，请在博途 CPU 属性中勾选【允许来自远程对象的 PUT/GET 通信访问】并确认 TCP 102 可达；"
+                        "若离线仿真调试，请传入 snapshot_file（LAD XML 目录或快照 JSON 路径）。"
+                    ),
+                }
 
         req_tags = req.tags or list(snapshot_data.keys())
         values_out = {t: snapshot_data.get(t) for t in req_tags}
         return sanitize_for_log({
             "Success": True,
+            "Connected": True,
             "Channel": "DualPipe_LiveData_Slot",
             "Protocol": "S7CommPlus/TCP102",
             "Endpoint": f"{safe_ip}:{int(req.port)}",
@@ -902,7 +942,7 @@ if __name__ == "__main__":
     if "--mcp" in sys.argv:
         mcp.run()
     else:
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+        ensure_utf8_stdout()
         print("=== TIA Connect 模块与 FastMCP 槽位状态 ===")
         env = check_environment()
         print(json.dumps(sanitize_for_log(env), ensure_ascii=False, indent=2))

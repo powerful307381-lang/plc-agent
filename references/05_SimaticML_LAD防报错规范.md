@@ -95,8 +95,8 @@
 3. 变量连到元件：`<Wire UId=".."><IdentCon UId="21"/><NameCon UId="22" Name="operand"/></Wire>`
 4. 元件之间串联：`<NameCon UId="22" Name="out"/>` → `<NameCon UId="23" Name="in"/>`
 5. 不用的输出引脚（如 TON 的 `ET`）按样板写法处理（用 `<OpenCon UId=".."/>`），**不得让引脚悬空不写**。
-6. 每个 `Part` / `Call` 的必需引脚都必须有导线连接；每个 `Access` 都必须被一根 Wire 引用。
-7. 一个程序段只放一条逻辑主线（一个输出或一组并列输出），复杂逻辑拆成多个程序段，便于新手阅读。
+6. 每个 `Part` / `Call` 的必需引脚都必须有导线连接；每个 `Access` 都必须被一根 Wire 引用（注：当 `TON`/`TOF` 的 `Q` 引脚不接线圈、仅在其他梯级或程序段通过 `全局定时器.<成员>.Q` 触点引用时，`Q` 引脚可不接线，仅需为未使用的 `ET` 连接 `<OpenCon UId=".."/>`）。
+7. **微功能闭环合段规则（一屏可读 1~4 条强关联梯级）**：一个程序段承载一个完整的微功能闭环（如 `TON` 计时+报警 `S/R` 锁存复位、成对 `SCoil/RCoil`、手自动模式切换双梯级、单步状态+本步 `TON` 延时、同设备正反转/双电控伸缩、同工位状态指示灯组）。在唯一 `<Powerrail />` Wire 中挂载多条独立梯级（Multi-Rung），或由中间元件输出通过一源多宿 Wire 做 T 型分叉驱动多线圈；**严禁为凑单线圈而硬造同块一次性过渡 `%M` 位，严禁将同一变量的 `SCoil` 与 `RCoil` 拆至不同程序段**；不同物理设备之间仍保持清晰分段。
 
 ## 5. 变量表 XML
 以 [templates/TagTable_样板.xml](../templates/TagTable_样板.xml) 为准，每个 `SW.Tags.PlcTag` 包含：`Name`、`DataTypeName`（Bool/Int/Real…）、`LogicalAddress`（如 `%I0.0`）、注释 `MultilingualText`（zh-CN）。I/O 与 M 分两张表：`IO变量表`、`M辅助继电器表`。
@@ -109,7 +109,8 @@
 - [ ] 每个 Wire 恰好一个源；每个 Part 的必需引脚都已连接；没有孤立的 Access；无 `<Part Name="Call">` 或 `Time` 类型的 `LiteralConstant`
 - [ ] 所有 `Symbol/Component` 引用的名字都存在于变量表或 DB 中
 - [ ] 所有 `MultilingualTextItem/Culture` = `zh-CN`；每个非空 CompileUnit 都有 Title 和 Comment
-- [ ] 命名规则与安全规则（[02_命名与注释规范.md](02_命名与注释规范.md)、[03_安全信号校验.md](03_安全信号校验.md)）校验通过
+- [ ] 命名规则与安全规则（[02_命名与注释规范.md](02_命名与注释规范.md)、[03_安全信号校验.md](03_安全信号校验.md)）校验通过（注：S2 极性校验按能流可达路径逐线圈判定，同段混合安全使能梯级与急停报警 `SCoil`/`RCoil` 梯级时合法放行）
+- [ ] **反碎片化审计（Anti-Fragmentation）**：`validate_lad_xml.py` 默认输出反碎片化告警（`--strict-compact` 升级为错误），`cli.py critic` 默认强拦截并生成重写指令：① 同块一次性冗余过渡 `%M` 桥接位；② 同块内同一变量 `SCoil`/`RCoil` 跨程序段拆分；③ 仅含 1 个程序段的迷你空壳业务 FC（不含 `FC99`）
 - [ ] **电源串联路径拓扑安全审计（S3/S4/S5）**：通过有向电源流图核验每个输出线圈串联前导触点（非单纯自锁或并联分支假串联），确保直接或间接传递串联 `M_安全条件满足`、正反转软件互锁常闭以及对应热继触点（报错阻断导入）
 - [ ] **死线圈检测（Dead Coil Check）**：除样板画廊外，程序段中同一驱动结果不存在无法驱动任何后级线圈的悬空中间触点链或死区输出（输出审计告警）
 - [ ] **双线圈拦截（Multiple Coil Check）**：同一个全局变量严禁在普通线圈 `<Part Name="Coil">` 中被重复驱动（报 ERROR，阻断导入）

@@ -30,7 +30,7 @@
 | 排除类别 | 典型型号 / 识别特征 | 禁止/受限原因 | 替代工程方案 |
 |---|---|---|---|
 | **1. 变频器与伺服驱动器 (Drives)** | `SINAMICS G120`、`G110`、`S120`、`V90`、`MICROMASTER`、订货号含 `6SL3` 等 | Openness CAx 导入不支持驱动对象报文（Telegram）及 Drive-CLiQ/TO 工艺参数映射 | 引导导出/填写 **`TO_Params.xlsx`**，通过 Openness `TechnologicalObjectGroup` 与 GSD/报文配置接口完成轴组态与调参 |
-| **2. 非按键面板 HMI 设备** | `Comfort Panel` (`TP700/TP900/TP1200/TP1500`)、`Basic Panel` (`KTP*`)、`Unified Panel` (`MTP*`)；仅按键面板（Key Panels 如 `KP8`/`KP32F`）例外 | CAx 不支持触摸屏/精智/统一面板画面工程及连接变量自动导入 | 仅在硬件拓扑中保留网口占位或由工程师通过 WinCC / HMI 通道独立组态，并由 `webapp-testing` 联调画面 |
+| **2. 非按键面板 HMI 设备** | `Comfort Panel` (`TP700/TP900/TP1200/TP1500`)、`Basic Panel` (`KTP*`)、`Unified Panel` (`MTP*`)；仅按键面板（Key Panels 如 `KP8`/`KP32F`）例外 | CAx 不支持触摸屏/精智/统一面板画面工程及连接变量自动导入 | 仅在硬件拓扑中保留网口占位或由工程师通过 WinCC / HMI 通道独立组态，并配合浏览器/Playwright 联调画面 |
 | **3. 特定型号 Scalance 工业交换机** | **`6GK5 602-0BA10-2AA3`**、**`6GK5 612-0BA10-2AA3`**、**`6GK5 623-0BA10-2AA3`** | 西门子官方 CAx 兼容性明确排除的 Scalance S/XB 安全与管理型交换机型号 | 拦截并提示在博途硬件目录中手动拖入对应 GSD/HSP，或仅在外部网络规划表登记拓扑端口 |
 
 ---

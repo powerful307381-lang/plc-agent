@@ -10,25 +10,14 @@
 import os
 from typing import Any, Dict, List, Optional
 
-
-def _escape_xml(val: Any) -> str:
-    return (
-        str(val or "")
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-    )
+try:
+    from common_utils import escape_xml as _escape_xml, write_utf8_bom_crlf
+except ImportError:
+    from scripts.common_utils import escape_xml as _escape_xml, write_utf8_bom_crlf  # type: ignore
 
 
 def _write_utf8_bom_crlf(out_path: str, lines: List[str]) -> str:
-    abs_path = os.path.abspath(out_path)
-    os.makedirs(os.path.dirname(abs_path), exist_ok=True)
-    content = "\r\n".join(lines) + "\r\n"
-    with open(abs_path, "wb") as f:
-        f.write(b"\xef\xbb\xbf")
-        f.write(content.encode("utf-8"))
-    return abs_path
+    return write_utf8_bom_crlf(out_path, "\r\n".join(lines) + "\r\n")
 
 
 def _infer_display_format(data_type: str, explicit_fmt: Optional[str] = None) -> str:
