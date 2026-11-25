@@ -1,4 +1,4 @@
-# ⚡ eplan-to-tia-lad
+# ⚡ plc-agent
 
 **EPLAN Electric P8 ➔ 西门子博途 (TIA Portal V16–V20) 产线级纯梯形图 (LAD) 闭环工程与虚拟调试 Agent Skill / MCP 工具链**
 
@@ -9,11 +9,11 @@
 [![MCP](https://img.shields.io/badge/FastMCP-OT_Hardened-orange)](#)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-`eplan-to-tia-lad` 是一套面向**电气设计工程师、电气调试工程师与工业自动化开发者**的生产级 AI 辅助工程流水线。它彻底摒弃了让大模型“凭空手写易错 XML 或混写 SCL 代码”的玩具级做法，采用 **“EPLAN 多模态/报表解析 ➔ 实测 SimaticML 模板克隆 ➔ 有向图割点安全形式化审查 (Safety Critic) ➔ TIA Openness 串行事务导入与编译自愈 ➔ 离散扫描周期闭环虚拟调试”** 的确定性工程架构，将静态电气图纸与工艺步序表直接转化为可编译、可防撞、可现场打点的博途工程与调试交付物。
+`plc-agent`（内置 Skill：`eplan-to-tia-lad`）是一套面向**电气设计工程师、电气调试工程师与工业自动化开发者**的生产级 AI 辅助工程流水线。它彻底摒弃了让大模型“凭空手写易错 XML 或混写 SCL 代码”的玩具级做法，采用 **“EPLAN 多模态/报表解析 ➔ 实测 SimaticML 模板克隆 ➔ 有向图割点安全形式化审查 (Safety Critic) ➔ TIA Openness 串行事务导入与编译自愈 ➔ 离散扫描周期闭环虚拟调试”** 的确定性工程架构，将静态电气图纸与工艺步序表直接转化为可编译、可防撞、可现场打点的博途工程与调试交付物。
 
 ---
 
-## ✨ 核心特性 (Why `eplan-to-tia-lad`?)
+## ✨ 核心特性 (Why `plc-agent`?)
 
 * **🚫 100% 纯梯形图 (Zero SCL) 与实测样板克隆**：严守产线维护直观性红线，严禁生成任何 `.scl` 代码。内置 20 份从真实博途 V16 导出的权威 SimaticML 母本（覆盖 `OB1/OB30/OB100`、`FC/FB` 多重背景、`GlobalDB/InstanceDB`、`UDT`、`PlcTagTable`、`PlcWatchTable`、`PlcForceTable` 及 17 类高频工艺指令），通过确定性 Python 构建器组装，杜绝 Schema 报错。
 * **🛡️ 图论割点级 Safety Critic 形式化安全审查**：内置基于有向能流图（Directed Power-Flow Graph）割点判定算法的本地审查器 (`validate_lad_xml.py` & `run_local_safety_critic`)。在导入博途前强制核验：
@@ -90,8 +90,8 @@
 ### 2. 安装依赖与挂载 Skill
 ```powershell
 # 1. 克隆仓库
-git clone https://github.com/powerful307381-lang/eplan-to-tia-lad.git
-cd eplan-to-tia-lad
+git clone https://github.com/powerful307381-lang/plc-agent.git
+cd plc-agent
 
 # 2. 安装 Python 依赖
 pip install -r requirements.txt
@@ -181,7 +181,7 @@ python scripts/reverse_to_delivery_tables.py --from-tia --out-dir "项目/OP10_�
 ## 📂 仓库目录结构
 
 ```text
-eplan-to-tia-lad/
+plc-agent/
 ├── SKILL.md                           # Agent 核心执行规范、9大工程铁律与四阶门禁定义
 ├── README.md                          # 项目中文开源主页与完整工程操作手册
 ├── LICENSE                            # MIT 开源协议
